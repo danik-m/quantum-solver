@@ -6,6 +6,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from scipy import constants
 from scipy import optimize
+from modules import simps
 
 # -------------------------------------------------------------------------
 # 1. КОНСТАНТИ
@@ -401,6 +402,6 @@ def main():
         run_finite_well_sim(m, L_meters, U0_ev * EV)
     else:
         run_infinite_well_sim(m, L_meters)
-        
+
 if __name__ == "__main__":
     main()
