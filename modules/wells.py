@@ -401,9 +401,6 @@ def main():
         run_finite_well_sim(m, L_meters, U0_ev * EV)
     else:
         run_infinite_well_sim(m, L_meters)
-
-
-if __name__ == "__main__":
-    main()
+        
 if __name__ == "__main__":
     main()
