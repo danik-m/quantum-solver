@@ -9,7 +9,6 @@ try:
     from .utils import HBAR, EV, M_E, plot_setup, draw_arrow
 except ImportError:
     from utils import HBAR, EV, M_E, plot_setup, draw_arrow
-
 # --- МАТЕМАТИКА ---
 
 def calc_harmonic_energy(omega, n):

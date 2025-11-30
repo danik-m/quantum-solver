@@ -99,5 +99,12 @@ def main():
         elif sys_type == "🌊 Хвильовий Пакет":
             run_wave_packet_simulation()
 
+            import sys, os
+current_dir = os.path.dirname(os.path.abspath(__file__))
+modules_dir = os.path.join(current_dir, "modules")
+
+if modules_dir not in sys.path:
+    sys.path.append(modules_dir)
+
 if __name__ == "__main__":
     main()

@@ -1,0 +1,2595 @@
+
+
+################ FILE: ./atomlab_pro_modules/orbital_engine.py ################
+
+
+# orbital_engine.py
+import numpy as np
+from scipy.special import sph_harm, genlaguerre
+
+# Hydrogenic radial wavefunction (unnormalized) R_{n,l}(r) in atomic units (a0=1)
+# For visualization we'll compute probability density |psi|^2
+
+def radial_part(n, l, r):
+    # n: principal, l: orbital
+    rho = 2.0 * r / n
+    # Associated Laguerre L_{n-l-1}^{2l+1}(rho)
+    k = n - l - 1
+    if k < 0:
+        return np.zeros_like(r)
+    L = genlaguerre(k, 2*l+1)(rho)
+    prefactor = (2.0/n)**3 * math.factorial(k) / (2*n*math.factorial(n + l)) if (n+l)>=0 else (2.0/n)**3
+    R = (rho**l) * np.exp(-rho/2.0) * L
+    return R
+
+def hydrogen_wavefunction(n, l, m, r, theta, phi):
+    # radial * angular
+    R = radial_part(n,l,r)
+    Y = sph_harm(m, l, phi, theta)
+    psi = R * Y
+    return psi
+
+
+
+################ FILE: ./atomlab_pro_modules/periodic_table.py ################
+
+
+# periodic_table.py
+# Contains full periodic table (Z, symbol, name, period, group, IE, EN, covalent radius)
+PERIODIC = {
+1: {'symbol':'H','name':'Hydrogen','period':1,'group':1,'IE':13.5984,'EN':2.20,'rcov':31},
+2: {'symbol':'He','name':'Helium','period':1,'group':18,'IE':24.5874,'EN':None,'rcov':28},
+3: {'symbol':'Li','name':'Lithium','period':2,'group':1,'IE':5.3917,'EN':0.98,'rcov':128},
+4: {'symbol':'Be','name':'Beryllium','period':2,'group':2,'IE':9.3227,'EN':1.57,'rcov':96},
+5: {'symbol':'B','name':'Boron','period':2,'group':13,'IE':8.298,'EN':2.04,'rcov':84},
+6: {'symbol':'C','name':'Carbon','period':2,'group':14,'IE':11.2603,'EN':2.55,'rcov':76},
+7: {'symbol':'N','name':'Nitrogen','period':2,'group':15,'IE':14.5341,'EN':3.04,'rcov':71},
+8: {'symbol':'O','name':'Oxygen','period':2,'group':16,'IE':13.6181,'EN':3.44,'rcov':66},
+9: {'symbol':'F','name':'Fluorine','period':2,'group':17,'IE':17.4228,'EN':3.98,'rcov':57},
+10:{'symbol':'Ne','name':'Neon','period':2,'group':18,'IE':21.5645,'EN':None,'rcov':58},
+11:{'symbol':'Na','name':'Sodium','period':3,'group':1,'IE':5.1391,'EN':0.93,'rcov':166},
+12:{'symbol':'Mg','name':'Magnesium','period':3,'group':2,'IE':7.6462,'EN':1.31,'rcov':141},
+13:{'symbol':'Al','name':'Aluminium','period':3,'group':13,'IE':5.9858,'EN':1.61,'rcov':121},
+14:{'symbol':'Si','name':'Silicon','period':3,'group':14,'IE':8.1517,'EN':1.90,'rcov':111},
+15:{'symbol':'P','name':'Phosphorus','period':3,'group':15,'IE':10.4867,'EN':2.19,'rcov':107},
+16:{'symbol':'S','name':'Sulfur','period':3,'group':16,'IE':10.3600,'EN':2.58,'rcov':105},
+17:{'symbol':'Cl','name':'Chlorine','period':3,'group':17,'IE':12.9676,'EN':3.16,'rcov':102},
+18:{'symbol':'Ar','name':'Argon','period':3,'group':18,'IE':15.7596,'EN':None,'rcov':106},
+# ... fill up to 118 with commonly available values (truncated for brevity in this template)
+}
+
+def get_element(Z):
+    return PERIODIC.get(Z, None)
+
+
+################ FILE: ./atomlab_pro_modules/ui.py ################
+
+
+# ui.py - helper UI functions for Streamlit rendering
+import streamlit as st
+import plotly.graph_objects as go
+import numpy as np
+
+def plot_bohr_svg(n_list, angle=0.0, highlight=None, size=500):
+    # returns html svg string
+    base = 40
+    cx = cy = size//2
+    svg = [f"<svg width='{size}' height='{size}' viewBox='0 0 {size} {size}' xmlns='http://www.w3.org/2000/svg'>"]
+    svg.append(f"<rect width='100%' height='100%' fill='#07070a' />")
+    svg.append(f"<circle cx='{cx}' cy='{cy}' r='8' fill='#ff6666' />")
+    for n in n_list:
+        r = base * n
+        svg.append(f"<circle cx='{cx}' cy='{cy}' r='{r}' stroke='#4c8cff' fill='none' stroke-width='2' opacity='0.6' />")
+    if highlight is not None:
+        r = base * highlight
+        ex = cx + r * math.cos(angle)
+        ey = cy + r * math.sin(angle)
+        svg.append(f"<circle cx='{ex}' cy='{ey}' r='6' fill='#00ffcc' />")
+    svg.append("</svg>")
+    return '\n'.join(svg)
+
+def plot_orbital_plotly(X,Y,Z,Values, isosurface=0.02):
+    fig = go.Figure(data=go.Isosurface(x=X.flatten(), y=Y.flatten(), z=Z.flatten(), value=Values.flatten(), isomin=Values.max()*isosurface, isomax=Values.max(), surface_count=4))
+    fig.update_layout(scene=dict(xaxis_visible=False,yaxis_visible=False,zaxis_visible=False), margin=dict(t=0,l=0,r=0,b=0))
+    return fig
+
+
+################ FILE: ./atomlab_pro_modules/bohr_model.py ################
+
+
+# bohr_model.py
+import math
+from math import cos, sin, pi
+
+def wavelength_ev_to_nm(E_eV):
+    # h (eV*s) * c (m/s) / E (eV) -> meters -> nm
+    h_eV_s = 4.135667696e-15
+    c = 299792458.0
+    if E_eV <= 0:
+        return None
+    lam_m = (h_eV_s * c) / E_eV
+    return lam_m * 1e9
+
+# Map visible wavelength (380..750 nm) to approximate RGB
+def wavelength_to_rgb(wavelength_nm):
+    if wavelength_nm is None:
+        return (255,255,255)
+    w = float(wavelength_nm)
+    gamma = 0.8
+    R=G=B=0.0
+    if 380 <= w <= 440:
+        R = -(w - 440) / (440 - 380)
+        G = 0.0
+        B = 1.0
+    elif 440 <= w <= 490:
+        R = 0.0
+        G = (w - 440) / (490 - 440)
+        B = 1.0
+    elif 490 <= w <= 510:
+        R = 0.0
+        G = 1.0
+        B = -(w - 510) / (510 - 490)
+    elif 510 <= w <= 580:
+        R = (w - 510) / (580 - 510)
+        G = 1.0
+        B = 0.0
+    elif 580 <= w <= 645:
+        R = 1.0
+        G = -(w - 645) / (645 - 580)
+        B = 0.0
+    elif 645 <= w <= 750:
+        R = 1.0
+        G = 0.0
+        B = 0.0
+    else:
+        R=G=B=0.0
+    # Intensity correction
+    if 380 <= w <= 420:
+        factor = 0.3 + 0.7*(w - 380)/(420-380)
+    elif 420 <= w <= 700:
+        factor = 1.0
+    elif 700 <= w <= 750:
+        factor = 0.3 + 0.7*(750 - w)/(750-700)
+    else:
+        factor = 0.0
+    def adjust(c):
+        if c==0.0:
+            return 0
+        return int(round((c*factor)**gamma * 255))
+    return (adjust(R), adjust(G), adjust(B))
+
+
+################ FILE: ./main.py ################
+
+import streamlit as st
+import sys
+import os
+
+# --- МАГІЯ ДЛЯ ІМПОРТІВ (Виправляє Pylance/Module errors) ---
+# Додаємо поточну папку до шляхів пошуку Python
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
+
+# Тепер імпорти точно запрацюють
+try:
+    import matplotlib
+    matplotlib.use('Agg') 
+    import matplotlib.pyplot as plt
+    from scipy import constants
+
+    # Імпорт з ваших модулів
+    from modules.utils import M_E, EV
+    from modules.wells import (
+        run_infinite_well_sim,
+        run_finite_well_sim,
+        get_wavefunction_inf,
+        get_wavefunction_finite
+    )
+    from modules.oscillator import run_oscillator_sim
+    from modules.barriers import run_barrier_sim
+    from modules.wavepacket import run_wave_packet_simulation
+
+except ImportError as e:
+    st.error(f"🚨 Помилка імпорту! Перевірте структуру папок.\nДеталі: {e}")
+    st.stop()
+
+# --- НАЛАШТУВАННЯ СТОРІНКИ ---
+st.set_page_config(layout="wide", page_title="Quantum Solver Modular", page_icon="⚛️")
+plt.style.use('default') 
+
+def main():
+    st.sidebar.title("🎛 Панель Керування")
+    
+    # 1. Вибір системи
+    sys_type = st.sidebar.selectbox("Оберіть задачу:", 
+        ["Потенціальна Яма", "Потенціальний Бар'єр", "Гармонічний Осцилятор", "🌊 Хвильовий Пакет"])
+    
+    sub_type = None
+    if sys_type == "Потенціальна Яма":
+        sub_type = st.sidebar.radio("Тип:", ["Нескінченні стінки", "Кінцеві стінки"])
+    elif sys_type == "Потенціальний Бар'єр":
+        sub_type = st.sidebar.radio("Тип:", ["Сходинка", "Прямокутний бар'єр"])
+
+    st.sidebar.markdown("---")
+    
+    # 2. Параметри
+    st.sidebar.header("Параметри")
+    params = {}
+    
+    # Вибір частинки
+    p_name = st.sidebar.selectbox("Частинка:", ["Електрон", "Протон", "Мюон"])
+    mass_map = {"Електрон": M_E, "Протон": constants.m_p, "Мюон": M_E * 207}
+    params['m'] = mass_map[p_name]
+    st.sidebar.caption(f"m = {params['m']:.2e} кг")
+
+    # Динамічні поля
+    if sys_type != "Гармонічний Осцилятор":
+        params['L'] = st.sidebar.number_input("Ширина L (м)", value=1e-9, format="%.2e")
+    
+    if sys_type in ["Потенціальний Бар'єр", "🌊 Хвильовий Пакет"] or \
+       (sys_type == "Потенціальна Яма" and sub_type == "Кінцеві стінки"):
+        params['U0'] = st.sidebar.number_input("Потенціал U₀ (еВ)", value=10.0, step=0.1) * EV
+        
+    if sys_type in ["Потенціальний Бар'єр", "🌊 Хвильовий Пакет"]:
+        params['E'] = st.sidebar.number_input("Енергія E (еВ)", value=5.0, step=0.1) * EV
+        
+    if sys_type == "Гармонічний Осцилятор":
+        params['omega'] = st.sidebar.number_input("Частота ω (рад/с)", value=5e15, format="%.2e", step=0.1e15)
+
+    st.sidebar.markdown("---")
+    
+    # Кнопка запуску
+    if st.sidebar.button("🚀 РОЗРАХУВАТИ", type="primary"):
+        st.session_state['run_calc'] = True
+
+    # 3. Запуск логіки з модулів
+    if st.session_state.get('run_calc'):
+        st.title(f"Результати: {sys_type}")
+        
+        if sys_type == "Потенціальна Яма":
+            if sub_type == "Нескінченні стінки":
+                run_infinite_well_sim(params)
+            elif sub_type == "Кінцеві стінки":
+                run_finite_well_sim(params)
+                
+        elif sys_type == "Гармонічний Осцилятор":
+            run_oscillator_sim(params)
+            
+        elif sys_type == "Потенціальний Бар'єр":
+            run_barrier_sim(params, sub_type)
+            
+        elif sys_type == "🌊 Хвильовий Пакет":
+            run_wave_packet_simulation()
+
+            import sys, os
+current_dir = os.path.dirname(os.path.abspath(__file__))
+modules_dir = os.path.join(current_dir, "modules")
+
+if modules_dir not in sys.path:
+    sys.path.append(modules_dir)
+
+if __name__ == "__main__":
+    main()
+
+################ FILE: ./modules/barriers.py ################
+
+# modules/barriers.py
+# Модуль для симуляції квантового бар'єра
+# Експортує функцію run_barrier_sim()
+# ------------------------------------------------------------------------------
+
+import streamlit as st
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import math
+from scipy import constants
+from scipy import linalg
+
+# -------------------------------------------------------------------------
+# 1. КОНСТАНТИ
+# -------------------------------------------------------------------------
+HBAR = constants.hbar
+M_E = constants.m_e
+M_P = constants.m_p
+EV = constants.electron_volt
+
+# Примітка: st.set_page_config видалено, оскільки цей файл імпортується як модуль.
+# Конфігурація сторінки має бути у вашому головному файлі.
+
+plt.style.use('default')
+
+# -------------------------------------------------------------------------
+# 2. МАТЕМАТИЧНЕ ЯДРО
+# -------------------------------------------------------------------------
+
+def safe_sqrt_complex(x):
+    """Безпечний корінь для скаляра чи масиву (повертає комплексні значення при потребі)."""
+    return np.sqrt(x + 0j)
+
+def get_k(E, m, U=0.0):
+    """
+    Розраховує хвильовий вектор k (може бути комплексним).
+    Повертає комплексне число.
+    Формула: k = sqrt(2 m (E - U)) / hbar
+    """
+    val = 2.0 * m * (E - U)
+    return safe_sqrt_complex(val) / HBAR
+
+class BarrierSolver:
+    """Клас для розрахунку хвильової функції для сходинки та прямокутного бар'єра."""
+    def __init__(self, m):
+        self.m = float(m)
+
+    def solve_step(self, E, U0, x):
+        """
+        Розв'язок для потенціальної сходинки в x=0: U(x<0)=0, U(x>=0)=U0
+        Повертає: psi_real (масив), prob_density (масив), T (float), R (float)
+        """
+        x = np.array(x, dtype=float)
+        k1 = get_k(E, self.m, 0.0)
+        k1 = complex(k1)
+
+        if E > U0:
+            k2 = get_k(E, self.m, U0)
+            k2 = complex(k2)
+            # Амплітуди відбиття і пропускання
+            R_amp = (k1 - k2) / (k1 + k2)
+            T_amp = 2.0 * k1 / (k1 + k2)
+
+            psi = np.zeros_like(x, dtype=complex)
+            left_mask = x < 0
+            right_mask = x >= 0
+
+            psi[left_mask] = np.exp(1j * k1 * x[left_mask]) + R_amp * np.exp(-1j * k1 * x[left_mask])
+            psi[right_mask] = T_amp * np.exp(1j * k2 * x[right_mask])
+
+            k1_r = k1.real if abs(k1.real) > 1e-18 else 1e-18
+            k2_r = k2.real if abs(k2.real) > 1e-18 else 1e-18
+            T = (k2_r / k1_r) * (abs(T_amp)**2)
+            R = abs(R_amp)**2
+            return np.real(psi), np.abs(psi)**2, T, R
+        else:
+            # E < U0
+            k2 = get_k(E, self.m, U0)
+            kappa = abs(complex(k2).imag)
+            psi = np.zeros_like(x, dtype=complex)
+            left_mask = x < 0
+            right_mask = x >= 0
+            
+            psi[left_mask] = np.exp(1j * k1 * x[left_mask]) + np.exp(-1j * k1 * x[left_mask])
+            psi[right_mask] = np.exp(-kappa * x[right_mask])
+            
+            # T = 0, R = 1
+            return np.real(psi), np.abs(psi)**2, 0.0, 1.0
+
+    def solve_rectangular(self, E, U0, L, x):
+        """
+        Розв'язок для прямокутного бар'єра шириною L.
+        Повертає psi_real, prob_density, T, R
+        """
+        x = np.array(x, dtype=float)
+        k1 = complex(get_k(E, self.m, 0.0))
+        k2_complex = complex(get_k(E, self.m, U0))
+
+        T = 0.0
+        R = 1.0
+        try:
+            if E > U0:
+                k2r = k2_complex.real
+                denom = 1.0 + (U0**2 * (np.sin(k2r * L)**2)) / (4.0 * E * (E - U0))
+                if denom == 0:
+                    T = 0.0
+                else:
+                    T = 1.0 / denom
+            else:
+                kappa = abs(k2_complex.imag)
+                if kappa * L > 100.0:
+                    T = 0.0
+                else:
+                    denom = 1.0 + (U0**2 * (np.sinh(kappa * L)**2)) / (4.0 * E * (U0 - E))
+                    T = 1.0 / denom
+            R = max(0.0, 1.0 - T)
+        except Exception:
+            T = 0.0
+            R = 1.0
+
+        psi = np.zeros_like(x, dtype=complex)
+        left_mask = x < 0
+        mid_mask = (x >= 0) & (x <= L)
+        right_mask = x > L
+
+        try:
+            k1c = k1
+            k2c = k2_complex
+            denom_t = 2.0 * k1c * k2c * np.cos(k2c * L) - 1j * (k1c**2 + k2c**2) * np.sin(k2c * L)
+            if np.abs(denom_t) < 1e-16:
+                t_amp = 0.0
+                r_amp = 1.0
+            else:
+                t_amp = (2.0 * k1c * k2c * np.exp(-1j * k1c * L)) / denom_t
+                r_amp = (1j * (k2c**2 - k1c**2) * np.sin(k2c * L)) / denom_t
+        except Exception:
+            t_amp = 0.0
+            r_amp = 1.0
+
+        if np.any(left_mask):
+            psi[left_mask] = np.exp(1j * k1 * x[left_mask]) + r_amp * np.exp(-1j * k1 * x[left_mask])
+
+        if np.any(mid_mask):
+            try:
+                x0 = 0.0
+                xL = L
+                M = np.array([
+                    [np.exp(1j * k2c * x0), np.exp(-1j * k2c * x0)],
+                    [1j * k2c * np.exp(1j * k2c * x0), -1j * k2c * np.exp(-1j * k2c * x0)]
+                ], dtype=complex)
+                psi_left_0 = 1.0 + r_amp
+                psi_left_der_0 = 1j * k1 * (1.0 - r_amp)
+                b = np.array([psi_left_0, psi_left_der_0], dtype=complex)
+                sol = linalg.solve(M, b)
+                Acoef, Bcoef = sol[0], sol[1]
+            except Exception:
+                Acoef, Bcoef = 0.0, 0.0
+
+            psi[mid_mask] = Acoef * np.exp(1j * k2c * x[mid_mask]) + Bcoef * np.exp(-1j * k2c * x[mid_mask])
+
+        if np.any(right_mask):
+            psi[right_mask] = t_amp * np.exp(1j * k1 * x[right_mask])
+
+        psi_real = np.real(psi)
+        prob = np.abs(psi)**2
+        return psi_real, prob, T, R
+
+# -------------------------------------------------------------------------
+# 3. ФУНКЦІЇ ВІЗУАЛІЗАЦІЇ
+# -------------------------------------------------------------------------
+def draw_arrow(ax, x1, x2, y, text, color='white'):
+    ax.annotate('', xy=(x1, y), xytext=(x2, y), arrowprops=dict(arrowstyle='<->', color=color))
+    ax.text((x1 + x2) / 2.0, y, text, ha='center', va='bottom', color=color,
+            bbox=dict(facecolor='#0e1117', alpha=0.9, edgecolor='none', boxstyle='round,pad=0.1'))
+
+def plot_setup(ax, title, U_max):
+    ax.set_title(title, color='white')
+    ax.set_xlabel("x (м)", color='white')
+    ax.set_ylabel("Енергія / Ψ", color='white')
+    ymin = -abs(U_max) * 0.12
+    ymax = abs(U_max) * 1.6 + 1e-30
+    ax.set_ylim(ymin, ymax)
+    ax.tick_params(colors='white')
+    for spine in ['left', 'bottom', 'right', 'top']:
+        ax.spines[spine].set_color('white')
+    ax.set_facecolor('#0e1117')
+    fig = ax.figure
+    fig.patch.set_facecolor('#0e1117')
+
+# -------------------------------------------------------------------------
+# 4. ГОЛОВНА ЛОГІКА МОДУЛЯ (ВИПРАВЛЕНА СИГНАТУРА)
+# -------------------------------------------------------------------------
+def run_barrier_sim(input_params=None, input_sub_type=None):
+    """
+    Ця функція викликається з головного файлу.
+    Параметри input_params і input_sub_type є необов'язковими.
+    Це виправляє помилку 'takes 0 positional arguments but 2 were given'.
+    """
+    show_results = False
+    
+    # Якщо параметри не передані (автономний запуск або перший вхід)
+    if input_params is None:
+        if 'run_calc_barrier' not in st.session_state:
+            st.session_state['run_calc_barrier'] = False
+
+        st.sidebar.title("🎛 Панель Керування (Бар'єр)")
+
+        sys_type = "Потенціальний Бар'єр"
+        sub_type = st.sidebar.radio("Тип бар'єру:", ["Сходинка", "Прямокутний бар'єр"])
+
+        st.sidebar.markdown("---")
+        st.sidebar.header("Параметри")
+
+        params = {}
+
+        # Частинка
+        particle_name = st.sidebar.selectbox("Частинка:", ["Електрон", "Протон", "Мюон"])
+        mass_map = {"Електрон": M_E, "Протон": M_P, "Мюон": M_E * 206.768}
+        params['m'] = float(mass_map[particle_name])
+
+        # Параметри L
+        if sub_type == "Прямокутний бар'єр":
+            params['L'] = st.sidebar.number_input("Ширина L (м)", value=1e-20, step=1e-10, format="%.2e")
+        else:
+            params['L'] = 0.0 
+
+        # Потенціал U0, енергія E
+        params['U0'] = st.sidebar.number_input("Потенціал U₀ (Дж)", value=50.0 * EV, step=1.6e-20, format="%.2e")
+        params['E'] = st.sidebar.number_input("Енергія E (Дж)", value=5.0 * EV, step=1.6e-20, format="%.2e")
+
+        st.sidebar.markdown("---")
+        if st.sidebar.button("🚀 РОЗРАХУВАТИ"):
+            st.session_state['run_calc_barrier'] = True
+            
+        show_results = st.session_state.get('run_calc_barrier', False)
+        
+    else:
+        # Режим виклику з main.py з переданими параметрами
+        params = input_params
+        sub_type = input_sub_type
+        show_results = True
+
+    # Відображення результатів
+    if show_results:
+        st.title(f"Результати: {sub_type}")
+        m = params.get('m', M_E)
+        L = params.get('L', 1e-9)
+        U0 = params.get('U0', 0.0)
+        E = params.get('E', 0.0)
+
+        # ------------------------------------------------------------------
+        # 1. СХОДИНКА
+        # ------------------------------------------------------------------
+        if sub_type == "Сходинка":
+            m_val = m
+            E_val = E
+            U0_val = U0
+            x_viz = np.linspace(-2e-9, 2e-9, 1000)
+
+            solver = BarrierSolver(m_val)
+            psi_real, psi_prob, T, R = solver.solve_step(E_val, U0_val, x_viz)
+
+            # Виводимо метрики
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                st.metric("T (Пропускання)", f"{T:.6f}")
+                st.metric("R (Відбиття)", f"{R:.6f}")
+
+            with col2:
+                fig, ax = plt.subplots(figsize=(10, 5))
+                plot_setup(ax, "Потенціальна Сходинка", max(E_val, U0_val, 1e-20))
+                U_viz = np.where(x_viz > 0, U0_val, 0.0)
+                ax.plot(x_viz, U_viz, 'w-', lw=2, label='U(x)')
+                ax.axhline(E_val, color='r', ls='--', label='E')
+
+                # Нормалізація для малювання
+                if np.max(np.abs(psi_real)) > 0:
+                    psi_plot = E_val + psi_real / np.max(np.abs(psi_real)) * (abs(E_val) + 0.5 * abs(U0_val) + 1e-20)
+                else:
+                    psi_plot = E_val + psi_real
+
+                ax.plot(x_viz, psi_plot, color='cyan', label=r'Re($\Psi$)')
+                ax.plot(x_viz, E_val + psi_prob / (np.max(psi_prob) + 1e-30) * (abs(E_val) + 0.5 * abs(U0_val) + 1e-20),
+                        color='green', ls=':', label=r'$|\Psi|^2$')
+
+                ax.legend(loc='upper right')
+                st.pyplot(fig)
+
+        # ------------------------------------------------------------------
+        # 2. ПРЯМОКУТНИЙ БАР'ЄР
+        # ------------------------------------------------------------------
+        elif sub_type == "Прямокутний бар'єр":
+            m_val = m
+            E_val = E
+            U0_val = U0
+            L_val = L
+
+            solver = BarrierSolver(m_val)
+            x = np.linspace(-2.0 * L_val, 3.0 * L_val, 1200)
+            psi_real, psi_prob, T, R = solver.solve_rectangular(E_val, U0_val, L_val, x)
+
+            # Метрики
+            st.metric("T (Пропускання)", f"{T:.6e}")
+            st.metric("R (Відбиття)", f"{R:.6f}")
+
+            # Візуалізація
+            fig, ax = plt.subplots(figsize=(11, 6))
+            plot_setup(ax, "Прямокутний Бар'єр", max(E_val, U0_val, 1e-20))
+            U_viz = np.zeros_like(x)
+            U_viz[(x >= 0) & (x <= L_val)] = U0_val
+            ax.plot(x, U_viz, 'w-', lw=2, label='U(x)')
+            ax.axhline(E_val, color='r', ls='--', label='E')
+
+            # Нормалізація хвилі
+            if np.max(np.abs(psi_real)) > 0:
+                psi_plot = E_val + psi_real / np.max(np.abs(psi_real)) * (max(U0_val, E_val) * 0.4 + 1e-20)
+            else:
+                psi_plot = E_val + psi_real
+
+            if np.max(psi_prob) > 0:
+                prob_plot = E_val + psi_prob / np.max(psi_prob) * (max(U0_val, E_val) * 0.4 + 1e-20)
+            else:
+                prob_plot = E_val + psi_prob
+
+            ax.plot(x, psi_plot, color='cyan', alpha=0.85, label=r'Re($\Psi$)')
+            ax.plot(x, prob_plot, color='lime', ls=':', label=r'$|\Psi|^2$')
+            draw_arrow(ax, 0.0, L_val, U0_val * 1.05, "L")
+            ax.legend(loc='upper right')
+            st.pyplot(fig)
+
+    elif input_params is None:
+        st.title("Квантовий Бар'єр")
+        st.markdown("Налаштуйте параметри зліва та натисніть **🚀 РОЗРАХУВАТИ**.")
+
+if __name__ == "__main__":
+    # Для тестування можна запустити як скрипт
+    st.set_page_config(layout="wide", page_title="Тест Модуля Бар'єрів")
+    run_barrier_sim()
+
+################ FILE: ./modules/oscillator.py ################
+
+import streamlit as st
+import numpy as np
+import matplotlib.pyplot as plt
+import math
+from scipy.special import hermite, factorial
+
+# Попытка импорта утилит (для работы и как модуль, и отдельно)
+try:
+    from .utils import HBAR, EV, M_E, plot_setup, draw_arrow
+except ImportError:
+    from utils import HBAR, EV, M_E, plot_setup, draw_arrow
+# --- МАТЕМАТИКА ---
+
+def calc_harmonic_energy(omega, n):
+    """E_n = hbar * omega * (n + 0.5)"""
+    return HBAR * omega * (n + 0.5)
+
+def solve_oscillator(omega, m, n_max=10):
+    """Список энергий"""
+    return [calc_harmonic_energy(omega, n) for n in range(n_max + 1)]
+
+def psi_oscillator(x, m, omega, n):
+    """Хвильова функція (Ерміт)"""
+    alpha = np.sqrt(m * omega / HBAR)
+    xi = alpha * x
+    if n > 50: n = 50
+    norm_coef = 1.0 / np.sqrt((2**n) * math.factorial(n)) * np.sqrt(alpha / np.sqrt(np.pi))
+    Hn = hermite(n)
+    psi = norm_coef * np.exp(-0.5 * xi**2) * Hn(xi)
+    return np.real(psi)
+
+# --- ВІЗУАЛІЗАЦІЯ ---
+
+def run_oscillator_sim(params):
+    st.markdown("## 〰️ Гармонічний Осцилятор")
+    
+    # --- ОПИС ТА ТЕОРІЯ (НОВЕ!) ---
+    with st.expander("📚 Що це таке? (Теорія та приклади)", expanded=False):
+        st.markdown(r"""
+        **Квантовий гармонічний осцилятор** — це одна з найважливіших моделей у квантовій механіці. Вона описує частинку, що знаходиться в параболічному потенціалі $U(x) = \frac{1}{2}m\omega^2 x^2$.
+        
+        ### 🔹 Основні властивості:
+        1.  **Квантування енергії:** Рівні енергії розташовані на рівних відстанях:
+            $$ E_n = \hbar \omega \left(n + \frac{1}{2}\right) $$
+        2.  **Нульова енергія:** Навіть при $n=0$ енергія не дорівнює нулю ($E_0 = \hbar\omega/2$). Це наслідок принципу невизначеності.
+        3.  **Тунелювання:** Хвильова функція проникає в класично заборонену область (за межі параболи).
+
+        ### 🔹 Приклади в природі:
+        * **Коливання атомів у молекулах** (наприклад, двоатомна молекула як пружинка).
+        * **Фонони** (коливання кристалічної ґратки).
+        * **Електромагнітне поле** в квантовій оптиці (фотони).
+        """)
+
+    # --- ГРАФІК ---
+    omega, m = params['omega'], params['m']
+    energies = solve_oscillator(omega, m, 10)
+    
+    n_viz = st.slider("Оберіть квантовий рівень n", 0, 5, 0, key="osc_n_slider_internal")
+    E_n = energies[n_viz]
+    
+    st.success(f"Рівень n={n_viz}: E = {E_n:.4e} Дж ({E_n/EV:.4f} еВ)")
+    
+    # Темний стиль для графіка (як на скріншоті)
+    plt.style.use('dark_background')
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Колір фону самого графіка і фігури
+    fig.patch.set_facecolor('#0e1117') 
+    ax.set_facecolor('#0e1117')
+    
+    # Межі
+    if m > 0 and omega > 0 and E_n > 0:
+        x_turn = np.sqrt(2.0 * E_n / (m * omega**2))
+        x_turn_max = np.sqrt(2.0 * energies[-1] / (m * omega**2))
+    else:
+        x_turn, x_turn_max = 1e-9, 1e-9
+        
+    x_lim = max(x_turn_max * 1.3, 1e-10)
+    x = np.linspace(-x_lim, x_lim, 800)
+    
+    # Потенціал (Біла лінія)
+    U = 0.5 * m * omega**2 * x**2
+    ax.plot(x, U, color='white', linewidth=2, label='U(x)')
+    
+    # Хвиля
+    psi = psi_oscillator(x, m, omega, n_viz)
+    
+    # Масштабування хвилі, щоб вона гарно виглядала на фоні енергії
+    scale = (energies[1] - energies[0]) * 0.8
+    psi_plot = E_n + psi / np.max(np.abs(psi)) * scale
+    prob_plot = E_n + (psi**2) / np.max(psi**2) * scale
+
+    # Лінії
+    ax.plot(x, psi_plot, label=r'$\Psi$', color='cyan', linewidth=2)
+    ax.plot(x, prob_plot, label=r'$|\Psi|^2$', color='magenta', linestyle=':', linewidth=2)
+    
+    # Заливка під квадратом модуля (пурпурна, напівпрозора)
+    ax.fill_between(x, E_n, prob_plot, color='magenta', alpha=0.2)
+    
+    # Рівень енергії (червоний пунктир)
+    ax.hlines(E_n, -x_lim, x_lim, colors='red', linestyles='--', linewidth=1, label=f'E_{n_viz}')
+    
+    # Стрілка ширини (2A)
+    draw_arrow(ax, -x_turn, x_turn, E_n * 1.05, f"2A={2.0 * x_turn:.1e} м", color='white')
+
+    # Налаштування осей (білі підписи)
+    ax.set_xlabel("x (м)", color='white', fontsize=12)
+    ax.set_ylabel("Енергія / Ψ", color='white', fontsize=12)
+    ax.set_title(f"Гармонічний Осцилятор (n={n_viz})", color='white', fontsize=14)
+    
+    # Колір поділок
+    ax.tick_params(axis='x', colors='white')
+    ax.tick_params(axis='y', colors='white')
+    
+    # Рамка (spines)
+    for spine in ax.spines.values():
+        spine.set_edgecolor('white')
+
+    ax.legend(loc='upper right', facecolor='#0e1117', labelcolor='white')
+    st.pyplot(fig)
+
+# --- ГОЛОВНА ФУНКЦІЯ МОДУЛЯ ---
+
+def main():
+    st.set_page_config(page_title="Гармонічний Осцилятор", layout="wide")
+    st.sidebar.header("Налаштування")
+    
+    from scipy import constants
+    
+    p_name = st.sidebar.selectbox("Частинка:", ["Електрон", "Протон", "Мюон"], key="osc_p")
+    mass_map = {"Електрон": constants.m_e, "Протон": constants.m_p, "Мюон": constants.m_e * 207}
+    
+    params = {}
+    params['m'] = float(mass_map[p_name])
+    params['omega'] = st.sidebar.number_input("Частота ω (рад/с)", value=5e15, format="%.2e", step=1e14, key="osc_w")
+    
+    if st.sidebar.button("Розрахувати", key="osc_btn"):
+        run_oscillator_sim(params)
+
+if __name__ == "__main__":
+    main()
+
+################ FILE: ./modules/__init__.py ################
+
+# modules/__init__.py
+from .utils import simps, M_E, EV
+
+__all__ = ["simps", "M_E", "EV"]
+
+################ FILE: ./modules/utils.py ################
+
+import matplotlib.pyplot as plt
+import cmath
+from scipy import constants
+
+# --- КОНСТАНТИ ---
+HBAR = constants.hbar
+M_E = constants.m_e
+EV = constants.electron_volt
+
+# --- ФУНКЦІЇ ---
+
+def get_k(E, m, U=0):
+    """Розраховує хвильовий вектор k."""
+    if m <= 0: return 0.0
+    val = 2 * m * (E - U)
+    return cmath.sqrt(val) / HBAR
+
+def plot_setup(ax, title, U_max=None):
+    """Базове налаштування графіків (темна тема)."""
+    ax.set_title(title, color='white', fontsize=14)
+    ax.set_xlabel("x (м)", color='white')
+    ax.set_ylabel("Енергія / Ψ", color='white')
+    
+    # Налаштування кольорів для темної теми
+    ax.set_facecolor('#0e1117')
+    fig = ax.figure
+    fig.patch.set_facecolor('#0e1117')
+    
+    ax.tick_params(colors='white')
+    for spine in ['left', 'bottom', 'right', 'top']:
+        ax.spines[spine].set_color('white')
+        
+    ax.grid(True, linestyle=':', alpha=0.3, color='gray')
+
+def draw_arrow(ax, x1, x2, y, text, color='white'):
+    """Малює стрілку розміру."""
+    if abs(x2 - x1) < 1e-20: return
+    ax.annotate('', xy=(x1, y), xytext=(x2, y), arrowprops=dict(arrowstyle='<->', color=color))
+    ax.text((x1 + x2) / 2.0, y, text, ha='center', va='bottom', color=color,
+            bbox=dict(facecolor='#0e1117', alpha=0.9, edgecolor='none', boxstyle='round,pad=0.1'))
+
+################ FILE: ./modules/wavepacket.py ################
+
+import streamlit as st
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import sparse
+from scipy.sparse.linalg import splu
+# Імпортуємо ТІЛЬКИ те, що реально є в utils.py
+from .utils import HBAR, EV, plot_setup, M_E
+
+class TimeDependentSolver:
+    def __init__(self, m, Nx=400, L_space=4e-8):
+        self.m = m
+        self.Nx = Nx
+        self.L_space = L_space
+        self.x = np.linspace(0, L_space, Nx)
+        self.dx = self.x[1] - self.x[0]
+        self.dt = 1e-17 
+
+    def simulate_packet(self, E_kin, U0, barrier_width):
+        V = np.zeros(self.Nx)
+        center = int(self.Nx * 0.5)
+        w_idx = int(barrier_width / self.dx)
+        V[center : center + w_idx] = U0
+        
+        # Хвильовий вектор k0
+        k0 = np.sqrt(2 * self.m * E_kin) / HBAR
+        x0 = self.L_space * 0.2
+        sigma = self.L_space * 0.05
+        
+        # Початковий хвильовий пакет (Гаусс)
+        psi = np.exp(-0.5 * ((self.x - x0)/sigma)**2) * np.exp(1j * k0 * self.x)
+        
+        # НОРМАЛІЗАЦІЯ (Виправлено: використовуємо np.trapz замість simps)
+        norm = np.sqrt(np.trapz(np.abs(psi)**2, self.x))
+        if norm > 0:
+            psi /= norm
+        
+        # Побудова Гамільтоніана (Crank-Nicolson)
+        h_val = HBAR**2 / (2 * self.m * self.dx**2)
+        diag = np.full(self.Nx, 2*h_val) + V
+        off = np.full(self.Nx-1, -h_val)
+        H = sparse.diags([off, diag, off], [-1, 0, 1], shape=(self.Nx, self.Nx))
+        
+        factor = 1j * self.dt / (2 * HBAR)
+        self.A = sparse.eye(self.Nx) + factor * H
+        self.B = sparse.eye(self.Nx) - factor * H
+        
+        return self.x, psi, self.A, self.B, V
+
+def run_wave_packet_simulation(params):
+    # Додаємо ключ, щоб кнопка не конфліктувала
+    if st.button("▶️ Старт", key="wp_start_btn"):
+        solver = TimeDependentSolver(params['m'], Nx=400, L_space=4e-8)
+        # Запускаємо симуляцію
+        x, psi, A, B, V = solver.simulate_packet(params['E'], params['U0'], barrier_width=2e-9)
+        
+        plot_spot = st.empty()
+        
+        # Підготовка розв'язувача для прискорення
+        try: 
+            lu = splu(A.tocsc())
+        except: 
+            lu = None
+            
+        # Цикл анімації
+        for i in range(80):
+            rhs = B.dot(psi)
+            if lu:
+                psi = lu.solve(rhs)
+            else:
+                psi = sparse.linalg.spsolve(A, rhs)
+                
+            # Малюємо кожен 2-й кадр
+            if i % 2 == 0:
+                fig, ax = plt.subplots(figsize=(10, 4))
+                
+                # Використовуємо plot_setup з utils
+                try:
+                    plot_setup(ax, f"Часова еволюція t={i}", xlabel="x (м)", ylabel="|Psi|^2")
+                except:
+                    ax.set_title(f"t={i}")
+                    ax.grid(True)
+                
+                # Масштабування потенціалу для красивого відображення
+                max_psi = np.max(np.abs(psi)**2)
+                scale_V = max_psi / (np.max(V/EV) + 1e-30) if np.max(V)>0 else 0
+                
+                # Малюємо бар'єр і хвилю
+                ax.plot(x*1e9, (V/EV) * scale_V, color='gray', alpha=0.5, label="Бар'єр")
+                ax.plot(x*1e9, np.abs(psi)**2, color='cyan', lw=2, label="Хвиля")
+                
+                ax.set_ylim(0, max_psi * 1.5)
+                plot_spot.pyplot(fig)
+                plt.close(fig)
+
+# Функція для автономного запуску (якщо запускаєте файл напряму)
+def main():
+    st.title("🌊 Хвильовий Пакет")
+    st.sidebar.header("Налаштування")
+    from scipy import constants
+    
+    params = {}
+    params['m'] = constants.m_e
+    params['E'] = st.sidebar.number_input("Енергія E (еВ)", value=5.0, step=0.1, key="wp_E") * EV
+    params['U0'] = st.sidebar.number_input("Висота U₀ (еВ)", value=10.0, step=0.1, key="wp_U0") * EV
+    
+    run_wave_packet_simulation(params)
+
+if __name__ == "__main__":
+    main()
+
+################ FILE: ./modules/wells.py ################
+
+import streamlit as st
+import numpy as np
+import matplotlib
+# Встановлюємо бекенд Agg для стабільності у Streamlit
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from scipy import constants
+from scipy import optimize
+from modules.utils import simps
+
+# -------------------------------------------------------------------------
+# 1. КОНСТАНТИ
+# -------------------------------------------------------------------------
+HBAR = constants.hbar
+M_E = constants.m_e
+M_P = constants.m_p
+EV = constants.electron_volt
+
+# Конфігурація сторінки тільки при прямому запуску
+if __name__ == "__main__":
+    st.set_page_config(layout="wide", page_title="Квантова Яма: Симуляція")
+
+# Темна тема для графіків
+plt.style.use('dark_background')
+
+# -------------------------------------------------------------------------
+# 2. МАТЕМАТИЧНЕ ЯДРО
+# -------------------------------------------------------------------------
+
+# ЗАМЕНИТЕ ЭТУ ФУНКЦИЮ НА СУЩЕСТВУЮЩУЮ В ВАШЕМ ФАЙЛЕ
+def solve_finite_well_energies(m, L, U0):
+    """
+    Надійний та швидкий пошук рівнів енергії кінцевої ями.
+    Працює навіть при L ≈ 0.03 м або U₀ ≈ 10⁴ еВ.
+    """
+    if U0 <= 0 or L <= 0:
+        return []
+
+    # Безрозмірний параметр η = L/2 * √(2mU₀)/ℏ
+    # (в літературі часто позначають z₀)
+    try:
+        eta = L/2.0 * np.sqrt(2.0 * m * U0) / HBAR
+    except (OverflowError, ValueError):
+        return []                                 # надто великі числа → рівнів немає
+
+    # Якщо η дуже маленьке — точно немає зв’язаних станів
+    if eta < 1e-6:
+        return []
+
+    # Обмежуємо кількість рівнів розумним числом (максимум ~200)
+    # Це найважливіше виправлення — без нього цикл стає нескінченним
+    max_n = min(200, int(np.ceil(eta / (np.pi/2.0))) + 5)
+
+    roots_z = []
+    eps = 1e-8
+
+    # Рівняння для парних станів
+    def even_eq(z):  
+        inside = np.clip((eta/z)**2 - 1.0, 0.0, None)
+        return np.tan(z) - np.sqrt(inside)
+
+    # Рівняння для непарних станів
+    def odd_eq(z):
+        inside = np.clip((eta/z)**2 - 1.0, 0.0, None)
+        return -1.0/np.tan(z) - np.sqrt(inside)
+
+    for n in range(max_n):
+        a = n * np.pi/2.0 + eps
+        b = (n + 1) * np.pi/2.0 - eps
+
+        if a >= eta:
+            break
+        if b > eta:
+            b = eta - eps
+
+        if a >= b:
+            continue
+
+        # парні стани
+        try:
+            fa, fb = even_eq(a), even_eq(b)
+            if np.isfinite(fa) and np.isfinite(fb) and fa * fb <= 0:
+                root = optimize.brentq(even_eq, a, b, xtol=1e-12, maxiter=100)
+                if 0 < root < eta:
+                    roots_z.append(('even', root))
+        except Exception:
+            pass
+
+        # непарні стани
+        try:
+            fa, fb = odd_eq(a), odd_eq(b)
+            if np.isfinite(fa) and np.isfinite(fb) and fa * fb <= 0:
+                root = optimize.brentq(odd_eq, a, b, xtol=1e-12, maxiter=100)
+                if 0 < root < eta:
+                    roots_z.append(('odd', root))
+        except Exception:
+            pass
+
+    # Перетворюємо знайдені z у енергію
+    energies = []
+    for parity, z in roots_z:
+        E = (HBAR ** 2 * (2.0 * z / L) ** 2) / (2.0 * m)     # E = ℏ²k²/2m, k = 2z/L
+        if E < U0:
+            kappa = np.sqrt(2.0 * m * (U0 - E)) / HBAR
+            energies.append({
+                'E': float(E),
+                'k': 2.0 * z / L,
+                'kappa': float(kappa),
+                'parity': parity
+            })
+
+    return sorted(energies, key=lambda x: x['E'])
+
+def solve_inf_well_energies(m, L, n_max=10):
+    """Аналітичний розрахунок для нескінченної ями (Дж)."""
+    energies = []
+    for n in range(1, n_max + 1):
+        E = (n**2 * np.pi**2 * HBAR**2) / (2.0 * m * L**2)
+        energies.append({'E': E, 'n': n, 'parity': 'even' if n % 2 != 0 else 'odd'})
+    return energies
+
+def get_wavefunction_finite(x_math, energy_data, L):
+    """
+    Хвильова функція кінцевої ями (x_math центровано в 0).
+    Використовує стабільну формулу для уникнення переповнення експоненти.
+    """
+    psi = np.zeros_like(x_math)
+    k, kappa, parity = energy_data['k'], energy_data['kappa'], energy_data['parity']
+    a = L / 2.0 
+    
+    # Замість розрахунку величезного A_out = trig * exp(kappa*a),
+    # ми обчислюємо значення одразу з компенсуючою експонентою exp(-kappa*x).
+    # Формула зовні: trig(ka) * exp(kappa * (a - |x|))
+    # Оскільки |x| > a, то (a - |x|) < 0, тому експонента завжди мала і безпечна.
+    
+    val_edge = np.cos(k*a) if parity == 'even' else np.sin(k*a)
+
+    for i, x in enumerate(x_math):
+        if abs(x) <= a:
+            # Всередині ями
+            psi[i] = np.cos(k*x) if parity == 'even' else np.sin(k*x)
+        else:
+            # Зовні ями (безпечний розрахунок)
+            exponent = kappa * (a - abs(x))
+            # Захист від занадто малих значень (underflow), хоча для float це не критично
+            if exponent < -700: 
+                val = 0.0
+            else:
+                val = val_edge * np.exp(exponent)
+            
+            psi[i] = val if (parity == 'even' or x > 0) else -val
+            
+    norm = np.sqrt(np.trapz(psi**2, x_math))
+    return psi / norm if norm > 0 else psi
+
+def get_wavefunction_inf(x_plot, n, L):
+    """Хвильова функція нескінченної ями (x_plot від 0 до L)."""
+    psi = np.zeros_like(x_plot)
+    mask = (x_plot >= 0) & (x_plot <= L)
+    psi[mask] = np.sqrt(2.0 / L) * np.sin(n * np.pi * x_plot[mask] / L)
+    return psi
+
+# -------------------------------------------------------------------------
+# 3. ФУНКЦІЇ ВІЗУАЛІЗАЦІЇ
+# -------------------------------------------------------------------------
+
+def setup_plot_style(ax, title, xlabel="x (м)", ylabel="Енергія (еВ)"):
+    """Базове налаштування стилю графіка."""
+    ax.set_title(title, color='white', fontsize=16, pad=20)
+    ax.set_xlabel(xlabel, color='white', fontsize=12)
+    ax.set_ylabel(ylabel, color='white', fontsize=12)
+    ax.tick_params(colors='white', labelsize=10)
+    ax.set_facecolor('#0E1117') # Темний фон, як у Streamlit
+    for spine in ax.spines.values():
+        spine.set_color('#444444')
+    ax.grid(True, linestyle='--', alpha=0.2, color='white')
+
+def draw_level_and_wave(ax, x, psi, prob, E_ev, L, color_psi='cyan', color_prob='lime'):
+    """Малює рівень енергії та хвильову функцію поверх нього."""
+    
+    # Визначаємо масштаб хвилі.
+    scale_factor = E_ev * 0.3 if E_ev > 1e-3 else 1.0
+    
+    # Зсуваємо хвилю на рівень енергії E
+    psi_shifted = E_ev + psi * scale_factor
+    prob_shifted = E_ev + prob * scale_factor
+    
+    # 1. Лінія енергії (пунктир)
+    ax.hlines(E_ev, x[0], x[-1], colors='red', linestyles='--', linewidth=1, alpha=0.7)
+    
+    # 2. Підпис енергії справа
+    ax.text(x[-1], E_ev, f"  E = {E_ev:.3e} еВ", 
+            color='red', va='center', fontsize=11, fontweight='bold')
+    
+    # 3. Хвильова функція (Лінія)
+    ax.plot(x, psi_shifted, color=color_psi, linewidth=2, label=r'$\Psi(x)$')
+    
+    # 4. Заливка під хвилею (напівпрозора)
+    ax.fill_between(x, E_ev, psi_shifted, color=color_psi, alpha=0.15)
+    
+    # 5. Густина ймовірності (Пунктир)
+    ax.plot(x, prob_shifted, color=color_prob, linestyle=':', linewidth=2, label=r'$|\Psi|^2$')
+
+# -------------------------------------------------------------------------
+# 4. ЕКСПОРТОВАНІ ФУНКЦІЇ СИМУЛЯЦІЇ
+# -------------------------------------------------------------------------
+
+def run_finite_well_sim(params):
+    """
+    Симуляція Кінцевої ями.
+    params: {'m': float, 'L': float, 'U0': float (Дж)}
+    """
+    m = params.get('m', M_E)
+    L_val = params.get('L', 1e-9)
+    U0_joule = params.get('U0', 10.0 * EV)
+    U0_ev = U0_joule / EV
+
+    st.subheader("📦 Кінцева Потенціальна Яма")
+
+    energies = solve_finite_well_energies(m, L_val, U0_joule)
+    
+    if not energies:
+        st.warning(f"⚠️ При глибині {U0_ev:.2f} еВ та ширині {L_val:.2e} м зв'язаних станів не знайдено.")
+        return
+
+    # Слайдер вибору n
+    n = st.slider("Квантове число n", 1, 10, 1, key="infinite_n_slider")
+    
+    state = energies[n-1]
+    E_ev = state['E'] / EV
+    parity_str = "Парна (Even)" if state['parity']=='even' else "Непарна (Odd)"
+
+    # Метрики
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Рівень", f"n = {n}")
+    c2.metric("Енергія", f"{E_ev:.4e} еВ")
+    c3.metric("Симетрія", parity_str)
+
+    # Графік
+    fig, ax = plt.subplots(figsize=(10, 6))
+    fig.patch.set_facecolor('#0E1117')
+    setup_plot_style(ax, f"Стаціонарний стан n={n}")
+
+    # Діапазон X: від -L до 2L (щоб показати хвости)
+    x = np.linspace(-L_val*0.8, L_val*1.8, 1000)
+    
+    # 1. Малюємо Яму (Стінки)
+    ax.fill_between(x, 0, U0_ev, where=(x <= 0), color='#4A90E2', alpha=0.2, label='Стінки бар\'єру')
+    ax.fill_between(x, 0, U0_ev, where=(x >= L_val), color='#4A90E2', alpha=0.2)
+    
+    # Лінія потенціалу
+    U_pot = np.where((x >= 0) & (x <= L_val), 0, U0_ev)
+    ax.plot(x, U_pot, color='white', linewidth=2)
+    ax.text(0, U0_ev * 1.02, f" U₀ = {U0_ev:.1f} еВ", color='white', fontsize=10)
+
+    # 2. Розрахунок хвилі
+    x_math = x - L_val/2.0
+    psi = get_wavefunction_finite(x_math, state, L_val)
+    prob = psi**2
+    if np.max(np.abs(psi)) > 0:
+        psi /= np.max(np.abs(psi))
+        prob /= np.max(prob)
+
+    # 3. Малюємо хвилю і рівень
+    draw_level_and_wave(ax, x, psi, prob, E_ev, L_val)
+
+    # Налаштування меж осей
+    y_max_plot = max(U0_ev * 1.3, E_ev * 1.5)
+    ax.set_ylim(-y_max_plot * 0.1, y_max_plot)
+    ax.set_xlim(x[0], x[-1])
+
+    ax.legend(loc='upper right', facecolor='#262730', labelcolor='white')
+    st.pyplot(fig)
+    
+    # ТЕОРІЯ
+    st.markdown("---")
+    st.markdown("""
+    ### 📝 Пояснення
+    У кінцевій ямі стінки мають висоту $U_0$. Частинка не заперта ідеально:
+    * **Всередині ($0 < x < L$):** Хвильова функція осцилює (sin/cos).
+    * **В стінках ($x < 0, x > L$):** Енергія частинки $E < U_0$, тому кінетична енергія формально від'ємна. Хвильова функція експоненційно затухає (**Туннельний ефект**).
+    """)
+
+def run_infinite_well_sim(params):
+    """
+    Симуляція Нескінченної ями.
+    params: {'m': float, 'L': float}
+    """
+    m = params.get('m', M_E)
+    L_val = params.get('L', 1e-9)
+
+    st.subheader("📦 Нескінченна Потенціальна Яма")
+
+    energies = solve_inf_well_energies(m, L_val, n_max=10)
+    E_max_limit = energies[-1]['E'] / EV
+
+    # Слайдер вибору n
+    n = st.slider("Квантове число n", 1, 10, 1, key="infinite_n_slider")
+    
+    state = energies[n-1]
+    E_ev = state['E'] / EV
+    parity_str = "Парна (Even)" if n % 2 != 0 else "Непарна (Odd)"
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Рівень", f"n = {n}")
+    c2.metric("Енергія", f"{E_ev:.4e} еВ")
+    c3.metric("Симетрія", parity_str)
+
+    # Графік
+    fig, ax = plt.subplots(figsize=(10, 6))
+    fig.patch.set_facecolor('#0E1117')
+    setup_plot_style(ax, f"Стаціонарний стан n={n}")
+
+    # Діапазон X
+    x = np.linspace(-L_val*0.2, L_val*1.2, 1000)
+    
+    # 1. Малюємо Стінки
+    ax.axvline(0, color='white', linewidth=3)
+    ax.axvline(L_val, color='white', linewidth=3)
+    
+    ymax_fill = E_max_limit * 1.5
+    ax.fill_between(x, -ymax_fill, ymax_fill, where=(x<0), color='gray', alpha=0.3, hatch='//')
+    ax.fill_between(x, -ymax_fill, ymax_fill, where=(x>L_val), color='gray', alpha=0.3, hatch='//')
+    ax.hlines(0, 0, L_val, color='white', linewidth=1)
+
+    # 2. Розрахунок хвилі
+    psi = get_wavefunction_inf(x, n, L_val)
+    prob = psi**2
+    if np.max(np.abs(psi)) > 0:
+        psi /= np.max(np.abs(psi))
+        prob /= np.max(prob)
+
+    # 3. Малюємо хвилю
+    draw_level_and_wave(ax, x, psi, prob, E_ev, L_val)
+
+    # Налаштування меж
+    ax.set_ylim(-E_max_limit * 0.1, E_max_limit * 1.2)
+    ax.set_xlim(x[0], x[-1])
+
+    ax.legend(loc='upper right', facecolor='#262730', labelcolor='white')
+    st.pyplot(fig)
+    
+    # ТЕОРІЯ
+    st.markdown("---")
+    st.markdown("""
+    ### 📝 Пояснення
+    У нескінченній ямі стінки абсолютно непроникні.
+    * **Граничні умови:** $\Psi(0) = 0$ та $\Psi(L) = 0$.
+    * **Енергія:** $E_n \\sim n^2$. Відстань між рівнями швидко зростає.
+    * Хвильова функція строго локалізована в межах $0..L$.
+    """)
+
+# -------------------------------------------------------------------------
+# 5. MAIN — ГОТОВИЙ ДЛЯ ВСТАВКИ
+# -------------------------------------------------------------------------
+def main():
+    st.set_page_config(page_title="Квантова Яма", layout="wide")
+    st.title("Квантова потенціальна яма")
+
+    st.sidebar.header("Налаштування симуляції")
+
+    # 1. Частинка
+    st.sidebar.subheader("Частинка")
+    particle = st.sidebar.radio(
+        "Оберіть частинку",
+        options=["Електрон", "Мюон", "Протон"],
+        index=0,
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+    mass_map = {"Електрон": M_E, "Мюон": 206.768 * M_E, "Протон": M_P}
+    m = mass_map[particle]
+
+    # 2. Довжина ями
+    st.sidebar.subheader("Довжина ями")
+    L_nm = st.sidebar.slider(
+        "L (нм)",
+        min_value=0.1,
+        max_value=100.0,
+        value=1.0,
+        step=0.1,
+        format="%.3f"
+    )
+    L_meters = L_nm * 1e-9
+    st.sidebar.markdown(f"**L = {L_nm:.3f} нм**")
+
+    # 3. Глибина потенціалу (тільки для кінцевої ями)
+    st.sidebar.subheader("Потенціал бар’єру")
+    U0_ev = st.sidebar.number_input(
+        "U₀ (еВ)",
+        min_value=0.1,
+        value=50.0,
+        step=1.0,
+        help="Глибина ями для кінцевої моделі"
+    )
+
+    # Вибір типу ями
+    well_type = st.sidebar.radio("Тип ями", ["Нескінченна яма", "Кінцева яма"])
+
+    # ЗАПУСК СИМУЛЯЦІЇ — ОЦЕ САМЕ ГОЛОВНЕ!
+    if well_type == "Кінцева яма":
+        run_finite_well_sim(m, L_meters, U0_ev * EV)
+    else:
+        run_infinite_well_sim(m, L_meters)
+        
+
+if __name__ == "__main__":
+    main()
+
+################ FILE: ./pages/1_Spin.py ################
+
+import streamlit as st
+import numpy as np
+import plotly.graph_objects as go
+
+# Налаштування сторінки
+st.set_page_config(page_title="Спін і Сфера Блоха", layout="wide")
+
+def run_spin_visualization():
+    st.title("🌀 Квантовий Спін: Сфера Блоха")
+    
+    # Охайний опис без зайвого виділення
+    st.markdown("""
+    Спін електрона (або будь-якої дворівневої системи, наприклад, кубіта) можна представити як вектор на одиничній сфері:
+    * **Північний полюс ($|0\\rangle$):** Спін направлений точно ВГОРУ (+Z).
+    * **Південний полюс ($|1\\rangle$):** Спін направлений точно ВНИЗ (-Z).
+    * **Екватор:** Стан суперпозиції (спін направлений вбік).
+    """)
+    
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.subheader("🎛 Параметри")
+        st.info("Обертайте вектор, змінюючи кути:")
+        
+        # Слайдери для кутів
+        theta = st.slider("Кут θ (Полярний)", 0.0, np.pi, 0.0, 0.01)
+        phi = st.slider("Кут φ (Азимутальний)", 0.0, 2*np.pi, 0.0, 0.01)
+        
+        st.divider()
+        st.subheader("📊 Стан системи")
+        
+        # Розрахунок амплітуд
+        prob_up = np.cos(theta / 2) ** 2      
+        prob_down = np.sin(theta / 2) ** 2    
+        
+        st.metric("Ймовірність Спін ВГОРУ (↑)", f"{prob_up * 100:.1f}%")
+        st.metric("Ймовірність Спін ВНИЗ (↓)", f"{prob_down * 100:.1f}%")
+        
+        # Формула
+        st.latex(r"|\Psi\rangle = \cos\frac{\theta}{2}|0\rangle + e^{i\phi}\sin\frac{\theta}{2}|1\rangle")
+
+    with col2:
+        # --- 3D ВІЗУАЛІЗАЦІЯ ---
+        
+        x = np.sin(theta) * np.cos(phi)
+        y = np.sin(theta) * np.sin(phi)
+        z = np.cos(theta)
+        
+        fig = go.Figure()
+        
+        # 1. Сфера (прозора)
+        u = np.linspace(0, 2 * np.pi, 50)
+        v = np.linspace(0, np.pi, 50)
+        x_sphere = np.outer(np.cos(u), np.sin(v))
+        y_sphere = np.outer(np.sin(u), np.sin(v))
+        z_sphere = np.outer(np.ones(np.size(u)), np.cos(v))
+        
+        fig.add_trace(go.Surface(
+            x=x_sphere, y=y_sphere, z=z_sphere,
+            opacity=0.1,
+            showscale=False,
+            colorscale='Blues',
+            hoverinfo='skip'
+        ))
+        
+        # 2. Осі координат (Товсті лінії)
+        line_len = 1.1
+        fig.add_trace(go.Scatter3d(x=[0, 0], y=[0, 0], z=[-line_len, line_len],
+            mode='lines', line=dict(color='blue', width=5), name='Z'))
+        fig.add_trace(go.Scatter3d(x=[-line_len, line_len], y=[0, 0], z=[0, 0],
+            mode='lines', line=dict(color='green', width=5), name='X'))
+        fig.add_trace(go.Scatter3d(x=[0, 0], y=[-line_len, line_len], z=[0, 0],
+            mode='lines', line=dict(color='orange', width=5), name='Y'))
+        
+        # 3. Вектор Спіна (Яскраво-червоний)
+        fig.add_trace(go.Scatter3d(
+            x=[0, x], y=[0, y], z=[0, z],
+            mode='lines+markers',
+            line=dict(color='red', width=10),     
+            marker=dict(size=6, color='red'),    
+            name='Вектор Спіна'
+        ))
+        
+        # 4. Точка на поверхні
+        fig.add_trace(go.Scatter3d(
+            x=[x], y=[y], z=[z],
+            mode='markers',
+            marker=dict(size=12, color='red', symbol='diamond'),
+            showlegend=False
+        ))
+
+        # 5. Текстові підписи полюсів
+        fig.add_trace(go.Scatter3d(
+            x=[0, 0, 1.3, 0, 0, 0],
+            y=[0, 0, 0, 1.3, 0, 0],
+            z=[1.1, -1.1, 0, 0, 0, 0],
+            mode='text',
+            text=['|0⟩ (↑)', '|1⟩ (↓)', '+X', '+Y', '', ''],
+            textposition="top center",
+            showlegend=False
+        ))
+
+        # Налаштування камери
+        fig.update_layout(
+            width=700, height=600,
+            title="Інтерактивна Сфера Блоха",
+            scene=dict(
+                xaxis=dict(visible=False, showbackground=False),
+                yaxis=dict(visible=False, showbackground=False),
+                zaxis=dict(visible=False, showbackground=False),
+                aspectmode='cube'
+            ),
+            margin=dict(l=0, r=0, b=0, t=30)
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+
+if __name__ == "__main__":
+    run_spin_visualization()
+
+################ FILE: ./pages/2_Entanglement.py ################
+
+import streamlit as st
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import time
+
+st.set_page_config(page_title="Квантова Заплутаність", layout="wide")
+
+def create_starfield(n=200):
+    """Генерує координати зірок для фону"""
+    x = np.random.uniform(-200, 200, n)
+    y = np.random.uniform(-100, 100, n)
+    z = np.random.uniform(-100, 100, n)
+    return x, y, z
+
+def run_entanglement_simulation():
+    st.title("🔗 Експерименти з Квантовою Заплутаністю")
+    
+    # Головне меню вибору симуляції
+    sim_type = st.radio("Оберіть експеримент:", 
+        ["1. Візуалізація Штерна-Герлаха (3D Анімація)", 
+         "2. Експеримент Белла (Графік кореляції)",
+         "3. Космічний Експеримент (Нелокальність)"])
+
+    st.divider()
+
+# === 1. ВІЗУАЛІЗАЦІЯ ШТЕРНА-ГЕРЛАХА (ВИПРАВЛЕНА ТА ПОКРАЩЕНА) ===
+    if sim_type == "1. Візуалізація Штерна-Герлаха (3D Анімація)":
+        st.header("1. Експеримент Штерна-Герлаха")
+        st.markdown("**Суть:** Розщеплення пучка заплутаних електронів у магнітному полі.")
+        
+        col1, col2 = st.columns([3, 1])
+        
+        with col2:
+            st.markdown("### 🎮 Керування")
+            if st.button("🔴 Генерувати нову пару", type="primary"):
+                st.session_state['run_sg'] = True
+                st.session_state['outcome_sg'] = np.random.choice([0, 1])
+            
+            st.markdown("---")
+            st.info("Натисніть кнопку, щоб створити нову пару електронів.")
+
+        with col1:
+            if 'outcome_sg' not in st.session_state:
+                st.session_state['outcome_sg'] = 0
+                
+            outcome = st.session_state['outcome_sg']
+            steps = 50
+            x_left = np.linspace(0, -6, steps)
+            x_right = np.linspace(0, 6, steps)
+            y_path = np.zeros(steps)
+            z_left = np.zeros(steps)
+            z_right = np.zeros(steps)
+            
+            mag_start = int(steps * 0.33)
+            t_def = np.linspace(0, 1, steps - mag_start)
+            deflection = 1.5 * t_def**2
+            
+            if outcome == 0: 
+                z_left[mag_start:] = deflection
+                z_right[mag_start:] = -deflection
+                res_text = "Результат: Лівий ⬆ (S), Правий ⬇ (N)"
+                c_l, c_r = 'red', 'blue'
+                spin_L, spin_R = "↑", "↓"
+            else:
+                z_left[mag_start:] = -deflection
+                z_right[mag_start:] = deflection
+                res_text = "Результат: Лівий ⬇ (N), Правий ⬆ (S)"
+                c_l, c_r = 'blue', 'red'
+                spin_L, spin_R = "↓", "↑"
+
+            fig = go.Figure()
+
+            # 1. Джерело
+            fig.add_trace(go.Scatter3d(x=[0], y=[0], z=[0], mode='markers', marker=dict(size=15, color='purple'), name='Джерело'))
+            
+            # 2. Траєкторії (Пунктир)
+            fig.add_trace(go.Scatter3d(x=x_left, y=y_path, z=z_left, mode='lines', line=dict(color='gray', width=4, dash='dot'), name='Шлях L'))
+            fig.add_trace(go.Scatter3d(x=x_right, y=y_path, z=z_right, mode='lines', line=dict(color='gray', width=4, dash='dot'), name='Шлях R'))
+
+            # 3. Магніти
+            # Лівий
+            fig.add_trace(go.Mesh3d(x=[-3,-3,-2,-2, -3,-3,-2,-2], y=[-1,1,1,-1, -1,1,1,-1], z=[1,1,1,1, 2,2,2,2], color='gray', opacity=0.3, name='L-Mag Top'))
+            fig.add_trace(go.Mesh3d(x=[-3,-3,-2,-2, -3,-3,-2,-2], y=[-1,1,1,-1, -1,1,1,-1], z=[-2,-2,-2,-2, -1,-1,-1,-1], color='gray', opacity=0.3, name='L-Mag Bot'))
+            # Правий
+            fig.add_trace(go.Mesh3d(x=[2,2,3,3, 2,2,3,3], y=[-1,1,1,-1, -1,1,1,-1], z=[1,1,1,1, 2,2,2,2], color='gray', opacity=0.3, name='R-Mag Top'))
+            fig.add_trace(go.Mesh3d(x=[2,2,3,3, 2,2,3,3], y=[-1,1,1,-1, -1,1,1,-1], z=[-2,-2,-2,-2, -1,-1,-1,-1], color='gray', opacity=0.3, name='R-Mag Bot'))
+            
+            # Підписи
+            fig.add_trace(go.Scatter3d(x=[-2.5, -2.5, 2.5, 2.5], y=[0,0,0,0], z=[1.2, -1.2, 1.2, -1.2], mode='text', text=['S', 'N', 'S', 'N'], textfont=dict(size=15, color='black'), showlegend=False))
+
+            # 4. Початкові електрони
+            fig.add_trace(go.Scatter3d(x=[0], y=[0], z=[0], mode='markers', marker=dict(color=c_l, size=10), name='Електрон L'))
+            fig.add_trace(go.Scatter3d(x=[0], y=[0], z=[0], mode='markers', marker=dict(color=c_r, size=10), name='Електрон R'))
+
+            # Анімація
+            frames = []
+            for i in range(0, steps, 1):
+                frames.append(go.Frame(data=[
+                    go.Scatter3d(x=[x_left[i]], y=[0], z=[z_left[i]], mode='markers', marker=dict(color=c_l, size=10)),
+                    go.Scatter3d(x=[x_right[i]], y=[0], z=[z_right[i]], mode='markers', marker=dict(color=c_r, size=10))
+                ]))
+
+            fig.update_layout(
+                width=800, height=500, 
+                scene=dict(xaxis=dict(title='Вісь пучка', range=[-6.5, 6.5]), yaxis=dict(visible=False, range=[-2, 2]), zaxis=dict(title='Відхилення', range=[-3, 3]), aspectmode='manual', aspectratio=dict(x=3, y=1, z=1)),
+                updatemenus=[dict(type="buttons", showactive=False, buttons=[dict(label="▶️ Старт", method="animate", args=[None, dict(frame=dict(duration=30, redraw=True), fromcurrent=True)])])]
+            )
+            fig.frames = frames
+            st.plotly_chart(fig)
+            
+            if st.session_state.get('run_sg'):
+                st.success(f"**{res_text}**")
+
+        # --- ДЕТАЛЬНИЙ ОПИС (ШТЕРН-ГЕРЛАХ) ---
+        st.markdown("---")
+        st.markdown("### 📚 Детальне пояснення експерименту")
+        st.markdown(r"""
+        **Історичний контекст:**
+        Експеримент, проведений Отто Штерном і Вальтером Герлахом у 1922 році, став фундаментальним доказом квантування моменту імпульсу. Вони пропускали пучок атомів срібла через сильне неоднорідне магнітне поле.
+
+        **Фізика процесу:**
+        1.  **Спін як магніт:** Електрон (або атом срібла) має власний момент імпульсу — спін. Це перетворює частинку на крихітний магніт із магнітним моментом $\mu$.
+        2.  **Неоднорідне поле:** Магніти спеціальної форми створюють поле, яке сильніше в одній точці простору і слабше в іншій (градієнт поля $\partial B / \partial z$).
+        3.  **Сила взаємодії:** На магнітний диполь у неоднорідному полі діє сила:
+            $$ F_z = \mu_z \frac{\partial B}{\partial z} $$
+        4.  **Квантування:** У класичній фізиці стрілка магніту може бути повернута під будь-яким кутом, тому ми очікували б побачити суцільну смугу атомів на екрані. Але у квантовій механіці проекція спіна на вісь Z може приймати лише два значення: $+\hbar/2$ (вгору) або $-\hbar/2$ (вниз).
+        
+        **Чому заплутаність?**
+        У нашій симуляції ми розглядаємо пару електронів у **синглетному стані**. Це означає, що їхній сумарний спін дорівнює нулю. 
+        $$ |\Psi\rangle = \frac{1}{\sqrt{2}} (| \uparrow \rangle_1 | \downarrow \rangle_2 - | \downarrow \rangle_1 | \uparrow \rangle_2) $$
+        Це створює жорстку кореляцію: якщо один електрон відхиляється вгору, інший **обов'язково** відхиляється вниз, щоб зберегти закон збереження моменту імпульсу. Це відбувається миттєво і узгоджено, що і демонструє анімація.
+        """)
+
+    # =============================================================================
+    # 2. НЕРІВНІСТЬ БЕЛЛА
+    # =============================================================================
+    elif sim_type == "2. Експеримент Белла (Графік кореляції)":
+        st.header("2. Перевірка Нерівності Белла")
+        
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            st.subheader("🛠 Налаштування")
+            a = st.slider("Кут детектора А (α)", 0, 360, 0, 15)
+            b = st.slider("Кут детектора Б (β)", 0, 360, 45, 15)
+            theta = abs(a - b)
+            st.info(f"Різниця: {theta}°")
+        
+        with c2:
+            st.subheader("🎲 Симуляція")
+            # Слайдер з кроком 100
+            n = st.slider("Кількість вимірювань", 100, 10000, 1000, step=100)
+            
+            if st.button("Запустити експеримент", type="primary"):
+                rad = np.radians(theta)
+                # Ймовірність різних результатів
+                p_diff = np.cos(rad/2)**2
+                rv = np.random.random(n)
+                diff = np.sum(rv < p_diff)
+                same = n - diff
+                # Кореляція
+                corr = (same - diff) / n
+                
+                fig, ax = plt.subplots(figsize=(6, 3))
+                ang = np.linspace(0, 360, 100)
+                ax.plot(ang, -np.cos(np.radians(ang)), 'k--', label='Квантова теорія')
+                ax.plot([theta], [corr], 'ro', label='Експеримент')
+                ax.set_xlabel("Різниця кутів")
+                ax.set_ylabel("Кореляція")
+                ax.legend()
+                st.pyplot(fig)
+        
+        # --- ДЕТАЛЬНЕ ПОЯСНЕННЯ (БЕЛЛ) ---
+        st.markdown("---")
+        st.markdown("### 📚 Пояснення Нерівності Белла")
+        st.markdown(r"""
+        **Проблема Ейнштейна-Подольського-Розена (EPR):**
+        Альберт Ейнштейн не вірив, що квантова механіка повна. Він вважав, що "Бог не грає в кості", і що у частинок є **приховані параметри** — інструкції, які визначають результат вимірювання заздалегідь, ще до моменту вимірювання. Ця концепція називається **локальним реалізмом**.
+
+        **Теорема Белла:**
+        У 1964 році Джон Белл довів, що якщо локальний реалізм правильний, то кореляція між результатами вимірювань двох частинок не може перевищувати певну межу (лінійна залежність від кута).
+        
+        * **Класичне передбачення:** Графік кореляції мав би бути прямими лініями (трикутна форма).
+        * **Квантове передбачення:** Графік кореляції — це косинусоїда ($E = -\cos(\theta)$).
+
+        **Результат симуляції:**
+        Як ви бачите на графіку, червона точка (ваш експеримент) лягає точно на пунктирну лінію косинуса. У певних точках (наприклад, 45 градусів) квантова кореляція **сильніша**, ніж це математично можливо для будь-якої класичної системи з прихованими параметрами.
+
+        **Висновок:**
+        Це доводить, що **локального реалізму не існує**. Частинки не мають заздалегідь визначеного стану, поки їх не виміряють. Вимірювання однієї частинки **миттєво** формує реальність для іншої, незалежно від відстані.
+        """)
+
+    # =============================================================================
+    # 3. КОСМІЧНИЙ ЕКСПЕРИМЕНТ (НОВИЙ ІНТЕРФЕЙС)
+    # =============================================================================
+    elif sim_type == "3. Космічний Експеримент (Нелокальність)":
+        st.header("3. Космічна Нелокальність")
+        
+        st.markdown("""
+        Ця симуляція демонструє парадокс миттєвої дії. 
+        Ми рознесли лабораторії на астрономічну відстань. Світловий сигнал (жовта точка) показує обмеження швидкості у Всесвіті ($c$), тоді як квантовий стан змінюється миттєво.
+        """)
+
+        # --- ІНТЕРФЕЙС ЯК НА СКРІНШОТІ ---
+        col1, col2 = st.columns([1.5, 2.5])
+
+        with col1:
+            st.info("Натисніть кнопку, щоб виміряти спін на Землі.")
+            
+            # Кнопки керування
+            if st.button("🔴 ВИМІРЯТИ СПІН (Аліса)", type="primary"):
+                st.session_state['cosmic_measured'] = True
+                st.session_state['cosmic_outcome'] = np.random.choice([1, -1])
+                st.session_state['show_animation'] = False 
+
+            if st.button("🔄 Скинути експеримент"):
+                st.session_state['cosmic_measured'] = False
+                st.session_state['show_animation'] = False
+                st.rerun()
+            
+            st.markdown("---")
+
+            # Блоки результатів (з'являються після вимірювання)
+            if st.session_state.get('cosmic_measured'):
+                outcome = st.session_state['cosmic_outcome']
+                # Логіка: якщо Земля +1 (Вгору), то Андромеда -1 (Вниз)
+                txt_earth = "ВГОРУ (↑)" if outcome == 1 else "ВНИЗ (↓)"
+                txt_andromeda = "ВНИЗ (↓)" if outcome == 1 else "ВГОРУ (↑)"
+                
+                st.success(f"🌍 Земля: {txt_earth}")
+                st.warning(f"🌌 Андромеда: {txt_andromeda}")
+                st.error("⏱ Час передачі стану: 0.00 с (Миттєво!)")
+                st.caption("Світло за цей час пройшло б мізерну відстань.")
+                
+                # Кнопка для запуску анімації (як на скріншоті "Дивитись результат")
+                if st.button("▶️ Дивитись Результат (Анімація)"):
+                    st.session_state['show_animation'] = True
+
+        with col2:
+            # --- ЛОГІКА 3D АНІМАЦІЇ ---
+            
+            # Координати
+            pos_Earth = [-80, 0, 0]
+            pos_Andromeda = [80, 0, 0]
+            
+            fig = go.Figure()
+
+            # 1. Фон (Зірки)
+            sx, sy, sz = create_starfield(300)
+            fig.add_trace(go.Scatter3d(x=sx, y=sy, z=sz, mode='markers', marker=dict(size=1, color='white', opacity=0.6), hoverinfo='none'))
+
+            # 2. Планети
+            fig.add_trace(go.Scatter3d(x=[pos_Earth[0]], y=[0], z=[0], mode='markers+text', marker=dict(size=25, color='blue'), text=["🌍 ЗЕМЛЯ"], textposition="top center", name="Земля"))
+            fig.add_trace(go.Scatter3d(x=[pos_Andromeda[0]], y=[0], z=[0], mode='markers+text', marker=dict(size=35, color='purple'), text=["🌌 АНДРОМЕДА"], textposition="top center", name="Андромеда"))
+            
+            # 3. Лінія зв'язку
+            fig.add_trace(go.Scatter3d(x=[-80, 80], y=[0,0], z=[0,0], mode='lines', line=dict(color='gray', width=1, dash='dash'), hoverinfo='none'))
+
+            # Анімація запускається тільки якщо натиснута кнопка перегляду
+            if st.session_state.get('show_animation') and st.session_state.get('cosmic_measured'):
+                outcome = st.session_state['cosmic_outcome']
+                frames = []
+                n_frames = 60
+                collapse_frame = 10 
+
+                for i in range(n_frames):
+                    # Світло (жовте)
+                    light_x = -80 + (i / n_frames) * 50 # Пролетить лише трохи
+                    
+                    if i < collapse_frame:
+                        # До вимірювання (пульсація)
+                        col_A = 'white'; col_B = 'white'
+                        vec_A = 0; vec_B = 0
+                    else:
+                        # Після вимірювання (вектори)
+                        growth = min(1.0, (i - collapse_frame) / 5.0)
+                        scale = 30 * growth
+                        vec_A = scale * outcome
+                        vec_B = -scale * outcome
+                        col_A = '#00FF00'; col_B = '#FF00FF' # Зелений і Малиновий
+
+                    frames.append(go.Frame(data=[
+                        go.Scatter3d(x=sx, y=sy, z=sz, mode='markers', marker=dict(size=1, color='white', opacity=0.6)), # Фон
+                        go.Scatter3d(x=[pos_Earth[0]], y=[0], z=[0], mode='markers+text', marker=dict(size=25, color='blue'), text=["🌍"]), # Земля
+                        go.Scatter3d(x=[pos_Andromeda[0]], y=[0], z=[0], mode='markers+text', marker=dict(size=35, color='purple'), text=["🌌"]), # Андромеда
+                        go.Scatter3d(x=[-80, 80], y=[0,0], z=[0,0], mode='lines', line=dict(color='gray', width=1, dash='dash')), # Лінія
+                        
+                        # Світло
+                        go.Scatter3d(x=[light_x], y=[0], z=[0], mode='markers', marker=dict(size=6, color='yellow'), name="Світло"),
+                        # Спін А
+                        go.Scatter3d(x=[-80,-80], y=[0,0], z=[0, vec_A], mode='lines+markers', line=dict(color=col_A, width=10), marker=dict(size=0), name="Спін А"),
+                        # Спін Б
+                        go.Scatter3d(x=[80,80], y=[0,0], z=[0, vec_B], mode='lines+markers', line=dict(color=col_B, width=10), marker=dict(size=0), name="Спін Б"),
+                    ]))
+                
+                # Початковий стан
+                fig.add_trace(go.Scatter3d(x=[-80], y=[0], z=[0], mode='markers', marker=dict(size=6, color='yellow'), name="Світло"))
+                fig.add_trace(go.Scatter3d(x=[-80,-80], y=[0,0], z=[0,0], mode='lines', line=dict(color='white', width=0), name="Спін А"))
+                fig.add_trace(go.Scatter3d(x=[80,80], y=[0,0], z=[0,0], mode='lines', line=dict(color='white', width=0), name="Спін Б"))
+
+                fig.update_layout(
+                    title="Анімація Колапсу",
+                    width=700, height=400,
+                    scene=dict(xaxis=dict(range=[-100,100], visible=False), yaxis=dict(range=[-50,50], visible=False), zaxis=dict(range=[-40,40], visible=False), bgcolor='black'),
+                    updatemenus=[dict(type="buttons", buttons=[dict(label="▶️ Старт", method="animate", args=[None, dict(frame=dict(duration=40, redraw=True), fromcurrent=True)])])]
+                )
+                fig.frames = frames
+                st.plotly_chart(fig)
+
+            else:
+                # Статичний вигляд до анімації
+                fig_s = go.Figure()
+                fig_s.add_trace(go.Scatter3d(x=sx, y=sy, z=sz, mode='markers', marker=dict(size=1, color='white', opacity=0.5)))
+                fig_s.add_trace(go.Scatter3d(x=[-80, 80], y=[0,0], z=[0,0], mode='markers+text', text=["🌍 ЗЕМЛЯ", "🌌 АНДРОМЕДА"], marker=dict(size=[25, 35], color=['blue', 'purple'])))
+                fig_s.update_layout(width=700, height=400, scene=dict(xaxis=dict(visible=False), yaxis=dict(visible=False), zaxis=dict(visible=False), bgcolor='black'))
+                st.plotly_chart(fig_s, use_container_width=True)
+
+        # --- ДЕТАЛЬНЕ ПОЯСНЕННЯ (ЕВЕРЕТТ) ---
+        st.markdown("---")
+        st.subheader("🌌 Пояснення: Теорія Еверетта (Багатосвітова інтерпретація)")
+        st.markdown(r"""
+        Ця анімація показує головний парадокс квантової механіки: як інформація може передаватися миттєво, швидше за світло? Жовта точка (світло) ледве встигла зрушити, а спін на Андромеді вже змінився.
+        
+        **Теорія Г'ю Еверетта (1957)** дає дивовижне пояснення, яке рятує теорію відносності:
+        
+        1.  **Універсальна Хвильова Функція:** Весь Всесвіт описується єдиною хвильовою функцією, яка містить у собі *всі можливі* варіанти подій. До вимірювання система знаходиться в стані:
+            $$ |\Psi\rangle = \frac{1}{\sqrt{2}} (| \uparrow_A \downarrow_B \rangle - | \downarrow_A \uparrow_B \rangle) $$
+        
+        2.  **Немає колапсу:** Коли Аліса вимірює спін, хвильова функція не "схлопується" випадково. Замість цього, **Всесвіт розгалужується**.
+        
+        3.  **Паралельні світи:**
+            * В одній гілці реальності існує Аліса, яка побачила **ВГОРУ**, і Боб, який має спін **ВНИЗ**.
+            * В іншій гілці існує копія Аліси, яка побачила **ВНИЗ**, і копія Боба зі спіном **ВГОРУ**.
+            
+        **Чому це вирішує проблему?**
+        Інформація не передавалася від Землі до Андромеди. Обидві гілки реальності існували в потенціалі завжди. Вимірювання просто визначило, **в якій саме гілці** опинилася ваша свідомість. Для Боба на Андромеді нічого не змінилося, поки він сам не зробить вимірювання і не дізнається, в яку гілку потрапив він (це завжди буде та сама гілка, що й у вас, для узгодженості історії).
+        """)
+
+if __name__ == "__main__":
+    run_entanglement_simulation()
+
+################ FILE: ./pages/hydrogen_simulation.py ################
+
+import streamlit as st
+import numpy as np
+import matplotlib
+# Встановлюємо бекенд Agg перед імпортом pyplot, щоб уникнути помилок потоків GUI
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from scipy import constants
+from scipy import optimize
+
+# -------------------------------------------------------------------------
+# 1. КОНФИГУРАЦИЯ И КОНСТАНТЫ
+# -------------------------------------------------------------------------
+HBAR = constants.hbar
+M_E = constants.m_e
+M_P = constants.m_p
+EV = constants.electron_volt
+
+st.set_page_config(layout="wide", page_title="Потенциальная Яма: Конечная и Бесконечная")
+
+# -------------------------------------------------------------------------
+# 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ВИЗУАЛИЗАЦИИ
+# -------------------------------------------------------------------------
+def draw_arrow(ax, x1, x2, y, text, color='white'):
+    """Рисует стрелку размера."""
+    ax.annotate('', xy=(x1, y), xytext=(x2, y), arrowprops=dict(arrowstyle='<->', color=color))
+    ax.text((x1 + x2) / 2.0, y, text, ha='center', va='bottom', color=color,
+            bbox=dict(facecolor='#0e1117', alpha=0.9, edgecolor='none', boxstyle='round,pad=0.1'))
+
+def plot_setup(ax, title, y_limit_ref, L):
+    """Настройка осей и цветов графика."""
+    ax.set_title(title, color='white', fontsize=16)
+    ax.set_xlabel("x (м)", color='white', fontsize=12)
+    ax.set_ylabel("Энергия (эВ)", color='white', fontsize=12)
+    
+    # Жесткие границы по Y для визуализации
+    ymin = -abs(y_limit_ref) * 0.1
+    ymax = abs(y_limit_ref) * 1.5
+    ax.set_ylim(ymin, ymax)
+    
+    # Расширяем границы по X
+    ax.set_xlim(-L * 0.5, L * 1.8)
+    
+    ax.tick_params(colors='white', which='both')
+    for spine in ['left', 'bottom', 'right', 'top']:
+        ax.spines[spine].set_color('white')
+    
+    ax.set_facecolor('#0e1117')
+    fig = ax.figure
+    fig.patch.set_facecolor('#0e1117')
+
+# -------------------------------------------------------------------------
+# 3. МАТЕМАТИЧЕСКОЕ ЯДРО (КОНЕЧНАЯ ЯМА)
+# -------------------------------------------------------------------------
+def solve_finite_well_energies(m, L, U0):
+    """Находит уровни энергии для КОНЕЧНОЙ ямы методом Брента."""
+    if U0 <= 0 or L <= 0:
+        return []
+
+    # P - параметр мощности ямы
+    P = (np.sqrt(2 * m * U0) * L) / (2 * HBAR)
+    max_z = P 
+    
+    roots_z = []
+    
+    def eq_even(z):
+        term = np.maximum((P/z)**2 - 1, 0)
+        return np.tan(z) - np.sqrt(term)
+    
+    def eq_odd(z):
+        term = np.maximum((P/z)**2 - 1, 0)
+        return -1.0/np.tan(z) - np.sqrt(term)
+
+    n_levels = int(1 + np.floor(2 * P / np.pi))
+    
+    for n in range(n_levels):
+        lower = n * (np.pi / 2.0) + 1e-4
+        upper = min((n + 1) * (np.pi / 2.0) - 1e-4, max_z - 1e-6)
+        
+        if lower >= upper: continue
+            
+        try:
+            if n % 2 == 0: # Четные (Even)
+                res = optimize.brentq(eq_even, lower, upper)
+                roots_z.append((res, 'even'))
+            else: # Нечетные (Odd)
+                res = optimize.brentq(eq_odd, lower, upper)
+                roots_z.append((res, 'odd'))
+        except ValueError:
+            pass 
+            
+    energies = []
+    for z, parity in roots_z:
+        E = (2.0 * HBAR * z / L)**2 / (2.0 * m)
+        if E < U0: 
+            energies.append({
+                'E': E,
+                'z': z,
+                'parity': parity,
+                'k': 2.0 * z / L,
+                'kappa': np.sqrt(2 * m * (U0 - E)) / HBAR
+            })
+    
+    energies.sort(key=lambda x: x['E'])
+    return energies
+
+def get_wavefunction_finite(x_plot, energy_data, L):
+    """Строит волновую функцию для КОНЕЧНОЙ ямы."""
+    x_math = x_plot - L/2.0 # Центрируем для математики
+    
+    psi = np.zeros_like(x_math)
+    k = energy_data['k']
+    kappa = energy_data['kappa']
+    parity = energy_data['parity']
+    a = L / 2.0 
+    
+    A_in = 1.0
+    
+    if parity == 'even':
+        val_edge = np.cos(k * a)
+        A_out = val_edge * np.exp(kappa * a)
+        for i, x in enumerate(x_math):
+            if abs(x) <= a:
+                psi[i] = A_in * np.cos(k * x)
+            else:
+                psi[i] = A_out * np.exp(-kappa * abs(x))
+    else:
+        val_edge = np.sin(k * a)
+        A_out = val_edge * np.exp(kappa * a)
+        for i, x in enumerate(x_math):
+            if abs(x) <= a:
+                psi[i] = A_in * np.sin(k * x)
+            else:
+                psi[i] = A_out * np.exp(-kappa * abs(x))
+                if x < 0: psi[i] *= -1
+                
+    norm = np.sqrt(np.trapz(psi**2, x_math))
+    if norm > 0:
+        psi /= norm
+        
+    return psi
+
+# -------------------------------------------------------------------------
+# 4. МАТЕМАТИЧЕСКОЕ ЯДРО (БЕСКОНЕЧНАЯ ЯМА)
+# -------------------------------------------------------------------------
+def solve_inf_well_energies(m, L, n_max=10):
+    """Находит уровни энергии для БЕСКОНЕЧНОЙ ямы (аналитически)."""
+    energies = []
+    for n in range(1, n_max + 1):
+        E = (n**2 * np.pi**2 * HBAR**2) / (2.0 * m * L**2)
+        # В симметричной яме n=1 (четная), n=2 (нечетная)
+        parity = 'even' if n % 2 != 0 else 'odd' 
+        energies.append({
+            'E': E,
+            'n': n,
+            'parity': parity
+        })
+    return energies
+
+def get_wavefunction_inf(x_plot, n, L):
+    """Строит волновую функцию для БЕСКОНЕЧНОЙ ямы."""
+    psi = np.zeros_like(x_plot)
+    mask = (x_plot >= 0) & (x_plot <= L)
+    psi[mask] = np.sqrt(2.0 / L) * np.sin(n * np.pi * x_plot[mask] / L)
+    return psi
+
+# -------------------------------------------------------------------------
+# 5. ИНТЕРФЕЙС И ЛОГИКА
+# -------------------------------------------------------------------------
+def main():
+    st.sidebar.title("🎛 Панель Управления")
+    st.sidebar.header("1. Частица")
+
+    particle_name = st.sidebar.selectbox("Выберите частицу:", ["Электрон", "Протон", "Мюон"])
+    mass_map = {"Электрон": M_E, "Протон": M_P, "Мюон": M_E * 206.768}
+    m = mass_map[particle_name]
+
+    st.sidebar.header("2. Параметры Ямы")
+    
+    # Выбор типа ямы
+    well_type = st.sidebar.radio("Тип стенок:", ["Конечные стенки", "Бесконечные стенки"])
+    
+    L_val = st.sidebar.number_input("Ширина L (м)", value=1e-9, step=1e-10, format="%.2e")
+    
+    # Потенциал только для конечной ямы
+    if well_type == "Конечные стенки":
+        U0_val_ev = st.sidebar.number_input("Потенциал U₀ (эВ)", value=10.0, step=0.1, format="%.2f")
+        U0_val = U0_val_ev * EV
+    else:
+        U0_val_ev = None
+        U0_val = None
+
+    st.sidebar.markdown("---")
+    
+    # --- БЛОК 1: ЗАГОЛОВОК И ПАРНОСТЬ ---
+    title_text = "Конечная Потенциальная Яма" if well_type == "Конечные стенки" else "Бесконечная Потенциальная Яма"
+    st.title(f"📦 {title_text}")
+
+    with st.container():
+        st.markdown("""
+        ### 🌗 Что такое Парность (Parity)?
+        В квантовой механике, если потенциал симметричен ($U(x) = U(-x)$), волновые функции имеют определенную **парность**:
+        
+        * **Парная (Четная / Even) (+):** Функция симметрична, $\Psi(-x) = \Psi(x)$.
+        * **Непарная (Нечетная / Odd) (-):** Функция антисимметрична, $\Psi(-x) = -\Psi(x)$.
+        """)
+        st.info("Уровни энергии всегда чередуются: четный, нечетный, четный...")
+
+    # --- ЛОГИКА РАСЧЕТА И ВИЗУАЛИЗАЦИИ ---
+    
+    if well_type == "Конечные стенки":
+        # === ЛОГИКА КОНЕЧНОЙ ЯМЫ ===
+        energies_data = solve_finite_well_energies(m, L_val, U0_val)
+        
+        if not energies_data:
+            st.error("Связанных уровней не найдено. Попробуйте увеличить ширину ямы или потенциал.")
+            return
+
+        num_levels = len(energies_data)
+        n_viz = st.slider("Квантовое число n", 1, num_levels, 1)
+        
+        state = energies_data[n_viz - 1]
+        E_n = state['E']
+        parity_str = "Четная (Even)" if state['parity'] == 'even' else "Нечетная (Odd)"
+        
+        # Метрики
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Квантовое число", f"n = {n_viz}")
+        c2.metric("Энергия E", f"{E_n/EV:.4f} эВ")
+        c3.metric("Парность", parity_str)
+
+        # График
+        fig, ax = plt.subplots(figsize=(12, 7))
+        plot_setup(ax, f"Конечная яма: n={n_viz} ({parity_str})", U0_val_ev, L_val)
+        
+        x_viz = np.linspace(-L_val * 0.5, L_val * 1.5, 1200)
+        
+        # Потенциал
+        U_pot = np.where((x_viz >= 0) & (x_viz <= L_val), 0.0, U0_val_ev)
+        ax.plot(x_viz, U_pot, 'w-', lw=2, alpha=0.6, label='Потенциал U(x)')
+        
+        # Энергия
+        E_ev = E_n / EV
+        ax.hlines(E_ev, x_viz[0], L_val * 1.4, colors='red', linestyles='--', linewidth=1.5)
+        ax.text(L_val * 1.42, E_ev, f" $E_{n_viz} = {E_ev:.3f}$ эВ", color='red', fontsize=12, va='center', fontweight='bold')
+        
+        # Волна
+        psi = get_wavefunction_finite(x_viz, state, L_val)
+        scale = U0_val_ev * 0.25
+        
+        psi_norm = psi / np.max(np.abs(psi)) if np.max(np.abs(psi)) > 0 else psi
+        psi_plot = E_ev + psi_norm * scale
+        prob_plot = E_ev + (psi_norm**2) * scale
+        
+        ax.plot(x_viz, psi_plot, color='cyan', lw=2.5, label=r'$\Psi_n(x)$')
+        ax.fill_between(x_viz, E_ev, psi_plot, color='cyan', alpha=0.2)
+        ax.plot(x_viz, prob_plot, color='lime', linestyle=':', lw=1.5, alpha=0.7, label=r'$|\Psi|^2$')
+        
+        draw_arrow(ax, 0, L_val, -U0_val_ev * 0.05, f"L = {L_val:.1e} м")
+        ax.legend(loc='upper right', facecolor='#0e1117', labelcolor='white', framealpha=0.8)
+        st.pyplot(fig)
+        
+        # Теория для конечной
+        st.markdown("---")
+        st.header("📚 Теория: Конечная яма")
+        col_t, col_e = st.columns(2)
+        with col_t:
+            st.markdown(r"""
+            **Особенности:**
+            1. **Туннельный эффект:** Волновая функция проникает в стенки ($e^{-\kappa x}$).
+            2. **Конечное число уровней:** Частица может покинуть яму, если $E > U_0$.
+            """)
+        with col_e:
+            st.markdown("**Примеры:** Квантовые точки, атомное ядро, гетероструктуры.")
+
+    else:
+        # === ЛОГИКА БЕСКОНЕЧНОЙ ЯМЫ ===
+        energies_data = solve_inf_well_energies(m, L_val, n_max=10)
+        
+        n_viz = st.slider("Квантовое число n", 1, 10, 1)
+        state = energies_data[n_viz - 1]
+        E_n = state['E']
+        parity_str = "Четная (Even)" if n_viz % 2 != 0 else "Нечетная (Odd)"
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Квантовое число", f"n = {n_viz}")
+        c2.metric("Энергия E", f"{E_n/EV:.4f} эВ")
+        c3.metric("Парность", parity_str)
+
+        fig, ax = plt.subplots(figsize=(12, 7))
+        # Для масштаба берем текущую энергию как референс (немного выше нее)
+        plot_setup(ax, f"Бесконечная яма: n={n_viz}", E_n/EV * 1.5, L_val)
+        
+        x_viz = np.linspace(-L_val * 0.2, L_val * 1.2, 1000)
+        
+        # Стенки (бесконечные) - рисуем вертикальные линии
+        ax.vlines([0, L_val], -E_n/EV * 0.1, E_n/EV * 2, colors='white', linewidth=3, label='Стенки ($\infty$)')
+        ax.hlines(0, -L_val*0.2, L_val*1.2, color='white', lw=1)
+        
+        # Энергия
+        E_ev = E_n / EV
+        ax.hlines(E_ev, x_viz[0], L_val * 1.4, colors='red', linestyles='--', linewidth=1.5)
+        ax.text(L_val * 1.42, E_ev, f" $E_{n_viz} = {E_ev:.3f}$ эВ", color='red', fontsize=12, va='center', fontweight='bold')
+        
+        # Волна
+        psi = get_wavefunction_inf(x_viz, n_viz, L_val)
+        
+        scale = E_ev * 0.4
+        
+        psi_norm = psi / np.max(np.abs(psi)) if np.max(np.abs(psi)) > 0 else psi
+        psi_plot = E_ev + psi_norm * scale
+        prob_plot = E_ev + (psi_norm**2) * scale
+        
+        ax.plot(x_viz, psi_plot, color='cyan', lw=2.5, label=r'$\Psi_n(x)$')
+        ax.fill_between(x_viz, E_ev, psi_plot, color='cyan', alpha=0.2)
+        ax.plot(x_viz, prob_plot, color='lime', linestyle=':', lw=1.5, alpha=0.7, label=r'$|\Psi|^2$')
+        
+        draw_arrow(ax, 0, L_val, -E_ev * 0.05, f"L = {L_val:.1e} м")
+        ax.legend(loc='upper right', facecolor='#0e1117', labelcolor='white', framealpha=0.8)
+        st.pyplot(fig)
+
+        # Теория для бесконечной
+        st.markdown("---")
+        st.header("📚 Теория: Бесконечная яма")
+        col_t, col_e = st.columns(2)
+        with col_t:
+            st.markdown(r"""
+            **Особенности:**
+            1. **Идеальная модель:** Стенки непроницаемы ($U = \infty$).
+            2. **Волновая функция:** Строго ноль на границах.
+            3. **Энергия:** Растет квадратично $E_n \propto n^2$.
+            """)
+        with col_e:
+            st.markdown("**Формула:** $E_n = \frac{n^2 \pi^2 \hbar^2}{2mL^2}$")
+
+if __name__ == "__main__":
+    main()
+    
+
+################ FILE: ./pages/relativity_simulator.py ################
+
+import streamlit as st
+import time
+
+# --- CONSTANTS & PHYSICS ---
+C = 300000  # Speed of light in km/s (scale)
+V = 240000  # Train speed in km/s
+GAMMA = 5 / 3  # 1.6666...
+L0_KM = 8.64 * 10**8  # Proper length in km
+
+# Initial Time on clocks at first meeting (12:00:00)
+T0_SECONDS = 12 * 3600
+
+# Contracted Length
+L_CONTRACTED = L0_KM / GAMMA
+
+# Events (in seconds from T0 in Platform Frame K)
+T_EVENT_1 = 0
+T_EVENT_2 = L_CONTRACTED / V  # 2160 sec
+T_EVENT_3 = L0_KM / V  # 3600 sec
+
+# --- HELPER FUNCTIONS ---
+
+def format_time(seconds):
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    return f"{h:02}:{m:02}:{s:02}"
+
+def get_train_time(t_k, x_k):
+    """
+    Lorentz Transformation for Time.
+    t, x are in Frame K (Platform). We want t' in Frame K' (Train)
+    t' = gamma * (t - v*x / c^2)
+    """
+    delta = (V * x_k) / (C**2)
+    return GAMMA * (t_k - delta)
+
+def get_modal_content(step):
+    if step == 1:
+        return {
+            "title": "Подія 1: Старт",
+            "desc": "Ніс поїзда (B') зрівнявся з початком платформи (A).",
+            "calc": "Це момент синхронізації. Ми приймаємо t=12:00:00. Спостерігач у поїзді бачить, що годинник B (попереду) відстає і показує 10:56:00.",
+            "next_step": 2,
+            "next_text": "Далі: чекаємо хвоста поїзда"
+        }
+    elif step == 2:
+        return {
+            "title": "Подія 2: Хвіст на старті",
+            "desc": "Хвіст поїзда (A') порівнявся з початком платформи (A).",
+            "calc": "На платформі пройшло 36 хв (t=12:36). Але на годиннику хвоста поїзда 13:00. Хвіст 'думає', що пройшло більше часу.",
+            "next_step": 3,
+            "next_text": "Перейти на кінець платформи"
+        }
+    elif step == 3:
+        return {
+            "title": "Подія 3: Голова на фініші",
+            "desc": "Ніс поїзда (B') дістався кінця платформи (B).",
+            "calc": "На платформі пройшла 1 година (t=13:00). На годиннику поїзда лише 12:36. Час у рухомому поїзді сповільнився.",
+            "next_step": 4,
+            "next_text": "Змінити систему: Перейти в Поїзд"
+        }
+    elif step == 4:
+        return {
+            "title": "Система Поїзда: Старт",
+            "desc": "Ми в голові поїзда (B'). Платформа летить на нас.",
+            "calc": "Годинник A показує 12:00, а годинник B (біля нас) показує 10:56. Платформа скорочена.",
+            "next_step": 5,
+            "next_text": "Їдемо до кінця платформи"
+        }
+    elif step == 5:
+        return {
+            "title": "Система Поїзда: Фініш голови",
+            "desc": "Ми проїхали кінець платформи (B).",
+            "calc": "На нашому годиннику 12:36. На годиннику B теж 12:36 (бо він відставав з початку).",
+            "next_step": 6,
+            "next_text": "Перейти у хвіст поїзда"
+        }
+    elif step == 6:
+        return {
+            "title": "Система Поїзда: Хвіст",
+            "desc": "Ми у хвості. Платформа пролітає повз.",
+            "calc": "Коли початок платформи (A) порівнявся з нами: наш час 13:00, час платформи A 12:36. Час платформи йде повільніше для нас.",
+            "next_step": 0,
+            "next_text": "Завершити"
+        }
+    return None
+
+# --- STREAMLIT APP ---
+
+st.set_page_config(page_title="Relativity Simulator", page_icon="🚄", layout="wide")
+
+# Initialize Session State
+if 'scenario_step' not in st.session_state:
+    st.session_state.scenario_step = 0
+if 'time_k' not in st.session_state:
+    st.session_state.time_k = -1000.0
+if 'is_running' not in st.session_state:
+    st.session_state.is_running = False
+
+# Constants for Animation
+SIM_SPEED_MULTIPLIER = 500  # Sim seconds per Real second
+FPS = 30
+DT = 1.0 / FPS
+
+# --- LOGIC CONTROL ---
+
+def reset_sim(step):
+    st.session_state.scenario_step = step
+    st.session_state.time_k = -1000.0
+    st.session_state.is_running = False
+
+# Step Logic
+step = st.session_state.scenario_step
+is_train_frame = step >= 4
+
+# Physics Update Loop (runs when 'is_running' is True)
+if st.session_state.is_running:
+    # Update time
+    st.session_state.time_k += SIM_SPEED_MULTIPLIER * DT
+    
+    # Check Events
+    stop_time = None
+    if (step == 1 or step == 4) and st.session_state.time_k >= T_EVENT_1:
+        stop_time = T_EVENT_1
+    elif (step == 2 or step == 6) and st.session_state.time_k >= T_EVENT_2:
+        stop_time = T_EVENT_2
+    elif (step == 3 or step == 5) and st.session_state.time_k >= T_EVENT_3:
+        stop_time = T_EVENT_3
+    
+    if stop_time is not None:
+        st.session_state.time_k = stop_time
+        st.session_state.is_running = False
+        st.rerun()
+    
+    time.sleep(DT)
+    st.rerun()
+
+# --- UI RENDERING ---
+
+st.title("🚄 Симулятор СТВ: Поїзд Ейнштейна")
+st.caption(f"v = 240,000 км/с (0.8c) | γ = {GAMMA:.3f}")
+
+# Header Controls
+col1, col2 = st.columns([3, 1])
+with col1:
+    if step == 0:
+        st.info("👋 Ласкаво просимо! Натисніть кнопку нижче, щоб почати експеримент.")
+        if st.button("Почати Експеримент", type="primary"):
+            reset_sim(1)
+            st.rerun()
+    else:
+        # Check if we are stopped at an event
+        modal_info = None
+        if not st.session_state.is_running:
+            # Check precise timing match for event
+            if (step == 1 or step == 4) and abs(st.session_state.time_k - T_EVENT_1) < 1: modal_info = get_modal_content(step)
+            elif (step == 2 or step == 6) and abs(st.session_state.time_k - T_EVENT_2) < 1: modal_info = get_modal_content(step)
+            elif (step == 3 or step == 5) and abs(st.session_state.time_k - T_EVENT_3) < 1: modal_info = get_modal_content(step)
+
+        if modal_info:
+            st.success(f"**{modal_info['title']}**")
+            st.markdown(f"{modal_info['desc']}")
+            st.warning(f"📐 {modal_info['calc']}")
+            if st.button(f"{modal_info['next_text']} ➡️"):
+                reset_sim(modal_info['next_step'])
+                if modal_info['next_step'] in [1, 4]: # Auto start only on new systems
+                     st.session_state.is_running = False 
+                else:
+                     st.session_state.is_running = False # Wait for user to play? Or auto? Let's wait.
+                st.rerun()
+        else:
+            st.write(f"👁️ **Спостерігач:** {'В Поїзді (K\')' if is_train_frame else 'На Платформі (K)'}")
+            
+with col2:
+    if step > 0:
+        t_display = format_time(T0_SECONDS + st.session_state.time_k) if st.session_state.time_k >= 0 else "Наближення..."
+        st.metric("Системний Час (K)", t_display)
+        
+        c_play, c_reset = st.columns(2)
+        if c_play.button("⏯️ Старт/Пауза"):
+            st.session_state.is_running = not st.session_state.is_running
+            st.rerun()
+        if c_reset.button("🔄 Скидання"):
+            st.session_state.time_k = -1000.0
+            st.session_state.is_running = False
+            st.rerun()
+
+# --- VISUALIZATION (SVG via HTML) ---
+if step > 0:
+    # Calculations for View
+    current_time_k = st.session_state.time_k
+    head_pos_km = V * current_time_k
+    tail_pos_km = head_pos_km - L_CONTRACTED
+    
+    # Viewport Mapping (0 -> 10%, L0 -> 90%)
+    def km_to_pct(km):
+        return 10 + (km / L0_KM) * 80
+    
+    train_width_pct = 80 * (1/GAMMA) # ~48%
+    
+    # Train Position Logic
+    if is_train_frame:
+        # Simplified Visuals for Train Frame: Platform moves left.
+        platform_left_style = f"{10 - ((V * current_time_k) / L0_KM * 80)}%"
+        train_left_style = "26%" # Fixed
+        
+    else:
+        # Platform Static
+        platform_left_style = "10%"
+        # Train Moves Right
+        train_left_pct = km_to_pct(tail_pos_km)
+        train_left_style = f"{train_left_pct}%"
+
+    # Clocks
+    clock_a = T0_SECONDS + current_time_k
+    clock_b = T0_SECONDS + current_time_k
+    
+    t_prime_head = T0_SECONDS + get_train_time(current_time_k, head_pos_km)
+    t_prime_tail = T0_SECONDS + get_train_time(current_time_k, tail_pos_km)
+    
+    # SVG Content - NO INDENTATION ALLOWED FOR HTML TAGS
+    svg_html = f"""
+<div style="background-color: #1e293b; border-radius: 10px; padding: 20px; position: relative; height: 300px; overflow: hidden; border: 4px solid #334155;">
+<div style="position: absolute; inset: 0; opacity: 0.2; background-image: linear-gradient(#4f46e5 1px, transparent 1px), linear-gradient(90deg, #4f46e5 1px, transparent 1px); background-size: 40px 40px;"></div>
+<div style="position: absolute; top: 50%; left: 0; width: 100%; height: 2px; background: rgba(30, 64, 175, 0.5); transform: translateY(10px);"></div>
+<div style="position: absolute; top: 50%; left: {platform_left_style}; width: 80%; height: 40px; background: #2563eb; border-bottom: 4px solid #1e40af; transform: translateY(20px); transition: left 0.05s linear; display: flex; justify-content: space-between; align-items: flex-end; padding: 0 10px;">
+<div style="color: #60a5fa; font-weight: bold; font-family: sans-serif; position: absolute; top: 100%; width: 100%; text-align: center; margin-top: 5px;">ПЛАТФОРМА</div>
+<div style="position: relative; top: -50px; left: -10px; background: #0f172a; border: 2px solid #3b82f6; padding: 4px; border-radius: 4px; text-align: center; width: 80px;">
+<div style="color: #60a5fa; font-size: 10px; font-weight: bold;">A (Плат)</div>
+<div style="color: white; font-family: monospace;">{format_time(clock_a)}</div>
+<div style="width: 2px; height: 20px; background: #3b82f6; margin: 0 auto;"></div>
+</div>
+<div style="position: relative; top: -50px; right: -10px; background: #0f172a; border: 2px solid #3b82f6; padding: 4px; border-radius: 4px; text-align: center; width: 80px;">
+<div style="color: #60a5fa; font-size: 10px; font-weight: bold;">B (Плат)</div>
+<div style="color: white; font-family: monospace;">{format_time(clock_b)}</div>
+<div style="width: 2px; height: 20px; background: #3b82f6; margin: 0 auto;"></div>
+</div>
+</div>
+<div style="position: absolute; top: 50%; left: {train_left_style}; width: {train_width_pct}%; height: 50px; background: #dc2626; border-bottom: 4px solid #991b1b; transform: translateY(-30px); border-radius: 8px; transition: left 0.05s linear; display: flex; justify-content: space-between; align-items: flex-start; padding: 0 10px; z-index: 10;">
+<div style="color: #f87171; font-weight: bold; font-family: sans-serif; position: absolute; bottom: 100%; width: 100%; text-align: center; margin-bottom: 5px;">ПОЇЗД</div>
+<div style="position: relative; top: -60px; left: -10px; background: #0f172a; border: 2px solid #ef4444; padding: 4px; border-radius: 4px; text-align: center; width: 80px;">
+<div style="color: #ef4444; font-size: 10px; font-weight: bold;">A' (Поїзд)</div>
+<div style="color: white; font-family: monospace;">{format_time(t_prime_tail)}</div>
+<div style="width: 2px; height: 20px; background: #ef4444; margin: 0 auto;"></div>
+</div>
+<div style="position: relative; top: -60px; right: -10px; background: #0f172a; border: 2px solid #ef4444; padding: 4px; border-radius: 4px; text-align: center; width: 80px;">
+<div style="color: #ef4444; font-size: 10px; font-weight: bold;">B' (Поїзд)</div>
+<div style="color: white; font-family: monospace;">{format_time(t_prime_head)}</div>
+<div style="width: 2px; height: 20px; background: #ef4444; margin: 0 auto;"></div>
+</div>
+</div>
+</div>
+"""
+    
+    st.markdown(svg_html, unsafe_allow_html=True)
+    
+    # Legend
+    st.markdown("""
+    <div style="text-align: right; color: gray; font-size: 12px; margin-top: 5px;">
+    🟦 Годинники Платформи (K) | 🟥 Годинники Поїзда (K')
+    </div>
+    """, unsafe_allow_html=True)
+
+# --- SOLUTION TEXT ---
+with st.expander("📖 Детальне пояснення та розрахунки", expanded=True):
+    st.markdown(r"""
+    ### 1. Вихідні Дані
+    * **Швидкість ($v$):** 240,000 км/с ($0.8c$)
+    * **Фактор Лоренца ($\gamma$):** $5/3 \approx 1.67$
+    * **Власна довжина ($L_0$):** $8.64 \cdot 10^8$ км
+    * **Скорочена довжина ($L$):** $5.184 \cdot 10^8$ км
+
+    ### 2. Ключові ефекти
+    1.  **Відносність одночасності:** Події, одночасні в системі платформи ($t_A=t_B$), не є одночасними в системі поїзда.
+        * Різниця часу: $\Delta t' = v L_0 / c^2$.
+        * У момент зустрічі ($t=12:00$), спостерігач на поїзді бачить на годиннику $B$ час **10:56**.
+    
+    2.  **Уповільнення часу:**
+        * Годинник, що рухається, йде повільніше у $\gamma$ разів.
+        * Коли на платформі проходить 1 година, на годиннику поїзда проходить лише 36 хвилин.
+    """)
+
+################ FILE: ./pages/relativitysim_2.py ################
+
+# barrier_only.py
+# ТІЛЬКИ БАР'ЄР — строго без жодних змін (як у твоєму оригіналі)
+
+import streamlit as st
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import constants, linalg
+
+# -------------------------------------------------------------------------
+# КОНСТАНТИ
+# -------------------------------------------------------------------------
+HBAR = constants.hbar
+M_E = constants.m_e
+EV = constants.electron_volt
+
+# -------------------------------------------------------------------------
+# БАР'ЄР — ТОЧНО ЯК БУЛО
+# -------------------------------------------------------------------------
+class BarrierSolver:
+    """Клас для розрахунку хвильової функції для сходинки та прямокутного бар'єра."""
+    def __init__(self, m):
+        self.m = float(m)
+    def solve_step(self, E, U0, x):
+        x = np.array(x, dtype=float)
+        k1 = get_k(E, self.m, 0.0)
+        k1 = complex(k1)
+        if E > U0:
+            k2 = get_k(E, self.m, U0)
+            k2 = complex(k2)
+            R_amp = (k1 - k2) / (k1 + k2)
+            T_amp = 2.0 * k1 / (k1 + k2)
+            psi = np.zeros_like(x, dtype=complex)
+            left_mask = x < 0
+            right_mask = x >= 0
+            psi[left_mask] = np.exp(1j * k1 * x[left_mask]) + R_amp * np.exp(-1j * k1 * x[left_mask])
+            psi[right_mask] = T_amp * np.exp(1j * k2 * x[right_mask])
+            k1_r = k1.real if abs(k1.real) > 1e-18 else 1e-18
+            k2_r = k2.real if abs(k2.real) > 1e-18 else 1e-18
+            T = (k2_r / k1_r) * (abs(T_amp)**2)
+            R = abs(R_amp)**2
+            return np.real(psi), np.abs(psi)**2, T, R
+        else:
+            k2 = get_k(E, self.m, U0)
+            kappa = abs(complex(k2).imag)
+            psi = np.zeros_like(x, dtype=complex)
+            left_mask = x < 0
+            right_mask = x >= 0
+            psi[left_mask] = np.exp(1j * k1 * x[left_mask]) + np.exp(-1j * k1 * x[left_mask])
+            psi[right_mask] = np.exp(-kappa * x[right_mask])
+            return np.real(psi), np.abs(psi)**2, 0.0, 1.0
+
+    def solve_rectangular(self, E, U0, L, x):
+        x = np.array(x, dtype=float)
+        k1 = complex(get_k(E, self.m, 0.0))
+        k2_complex = complex(get_k(E, self.m, U0))
+        T = 0.0
+        R = 1.0
+        try:
+            if E > U0:
+                k2r = k2_complex.real
+                denom = 1.0 + (U0**2 * (np.sin(k2r * L)**2)) / (4.0 * E * (E - U0))
+                if denom == 0:
+                    T = 0.0
+                else:
+                    T = 1.0 / denom
+            else:
+                kappa = abs(k2_complex.imag)
+                if kappa * L > 100.0:
+                    T = 0.0
+                else:
+                    denom = 1.0 + (U0**2 * (np.sinh(kappa * L)**2)) / (4.0 * E * (U0 - E))
+                    T = 1.0 / denom
+            R = max(0.0, 1.0 - T)
+        except Exception:
+            T = 0.0
+            R = 1.0
+        psi = np.zeros_like(x, dtype=complex)
+        left_mask = x < 0
+        mid_mask = (x >= 0) & (x <= L)
+        right_mask = x > L
+        try:
+            k1c = k1
+            k2c = k2_complex
+            denom_t = 2.0 * k1c * k2c * np.cos(k2c * L) - 1j * (k1c**2 + k2c**2) * np.sin(k2c * L)
+            if np.abs(denom_t) < 1e-16:
+                t_amp = 0.0
+                r_amp = 1.0
+            else:
+                t_amp = (2.0 * k1c * k2c * np.exp(-1j * k1c * L)) / denom_t
+                r_amp = (1j * (k2c**2 - k1c**2) * np.sin(k2c * L)) / denom_t
+        except Exception:
+            t_amp = 0.0
+            r_amp = 1.0
+        if np.any(left_mask):
+            psi[left_mask] = np.exp(1j * k1 * x[left_mask]) + r_amp * np.exp(-1j * k1 * x[left_mask])
+        if np.any(mid_mask):
+            try:
+                x0 = 0.0
+                xL = L
+                M = np.array([
+                    [np.exp(1j * k2c * x0), np.exp(-1j * k2c * x0)],
+                    [1j * k2c * np.exp(1j * k2c * x0), -1j * k2c * np.exp(-1j * k2c * x0)]
+                ], dtype=complex)
+                psi_left_0 = 1.0 + r_amp
+                psi_left_der_0 = 1j * k1 * (1.0 - r_amp)
+                b = np.array([psi_left_0, psi_left_der_0], dtype=complex)
+                sol = linalg.solve(M, b)
+                Acoef, Bcoef = sol[0], sol[1]
+            except Exception:
+                Acoef, Bcoef = 0.0, 0.0
+            psi[mid_mask] = Acoef * np.exp(1j * k2c * x[mid_mask]) + Bcoef * np.exp(-1j * k2c * x[mid_mask])
+        if np.any(right_mask):
+            psi[right_mask] = t_amp * np.exp(1j * k1 * x[right_mask])
+        psi_real = np.real(psi)
+        prob = np.abs(psi)**2
+        return psi_real, prob, T, R
+
+# -------------------------------------------------------------------------
+# ДОПОМІЖНІ ФУНКЦІЇ (залишено тільки те, що потрібно для бар’єру)
+# -------------------------------------------------------------------------
+def safe_sqrt_complex(x):
+    return np.sqrt(x + 0j)
+
+def get_k(E, m, U=0.0):
+    val = 2.0 * m * (E - U)
+    return safe_sqrt_complex(val) / HBAR
+
+# -------------------------------------------------------------------------
+# ОСНОВНА ФУНКЦІЯ — ТІЛЬКИ БАР'ЄР
+# -------------------------------------------------------------------------
+def run_barrier_sim():
+    st.title("Потенціальний Бар’єр та Сходинка")
+    
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        barrier_type = st.radio("Тип", ["Прямокутний бар’єр", "Сходинка"])
+        E_ev = st.slider("Енергія E (еВ)", 1.0, 200.0, 40.0)
+        U0_ev = st.slider("Висота U₀ (еВ)", 10.0, 300.0, 100.0)
+        L_nm = st.slider("Ширина L (нм)", 0.5, 10.0, 2.0) if barrier_type == "Прямокутний бар’єр" else None
+
+    with col2:
+        E = E_ev * EV
+        U0 = U0_ev * EV
+        L = L_nm * 1e-9 if L_nm else 1e-9
+        solver = BarrierSolver(M_E)
+
+        if barrier_type == "Прямокутний бар’єр":
+            x = np.linspace(-2*L, 6*L, 1500)
+            psi_r, prob, T, R = solver.solve_rectangular(E, U0, L, x)
+        else:
+            x = np.linspace(-5e-9, 5e-9, 1500)
+            psi_r, prob, T, R = solver.solve_step(E, U0, x)
+
+        st.metric("T (проходження)", f"{T:.6e}")
+        st.metric("R (відбиття)", f"{R:.6f}")
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.plot(x*1e9, np.zeros_like(x) + E/EV, 'r--', lw=2, label=f"E = {E_ev:.1f} еВ")
+        ax.plot(x*1e9, psi_r*50 + E/EV, 'cyan', lw=2, label="Re ψ(x)")
+        ax.plot(x*1e9, prob*100 + E/EV, 'lime', lw=2, ls=':', alpha=0.8, label="|ψ|²")
+        ax.set_xlabel("x (нм)")
+        ax.set_title(barrier_type)
+        ax.legend()
+        st.pyplot(fig)
+
+if __name__ == "__main__":
+    run_barrier_sim()

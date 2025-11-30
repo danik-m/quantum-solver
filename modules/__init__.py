@@ -1,6 +1,3 @@
-try:
-    from scipy.integrate import simps
-except ImportError:
-    from scipy.integrate import simpson as simps
+from .utils import simps, M_E, EV
 
-__all__ = ["simps"]
+__all__ = ["simps", "M_E", "EV"]
