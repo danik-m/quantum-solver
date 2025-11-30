@@ -2,6 +2,8 @@ import streamlit as st
 import sys
 import os
 
+from modules.wells import finite_well_description, infinite_well_description
+
 # --- МАГІЯ ДЛЯ ІМПОРТІВ (Виправляє Pylance/Module errors) ---
 # Додаємо поточну папку до шляхів пошуку Python
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -92,8 +94,10 @@ def main():
         
         if sys_type == "Потенціальна Яма":
             if sub_type == "Нескінченні стінки":
+                infinite_well_description( )
                 run_infinite_well_sim(params)
             elif sub_type == "Кінцеві стінки":
+                finite_well_description()
                 run_finite_well_sim(params)
                 
         elif sys_type == "Гармонічний Осцилятор":

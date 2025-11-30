@@ -8,6 +8,57 @@ from scipy import constants
 from scipy import optimize
 from scipy.integrate import simps
 
+def infinite_well_description():
+    """
+    ОПИС НЕСКІНЧЕННОЇ ЯМИ
+
+    Тут пиши будь-які тексти, формули та пояснення:
+    - основні рівняння
+    - умови нормалізації
+    - поведінка хвильових функцій при зміні L
+    - графічні ілюстрації (через st.write / st.latex)
+    """
+    import streamlit as st
+    st.subheader("Нескінченна потенціальна яма")
+    st.markdown("""
+    **Опис:**  
+    У нескінченній потенціальній ямі частинка може існувати тільки між 0 і L.  
+    Рівняння хвильової функції:
+
+    \\[
+    \\psi_n(x) = \\sqrt{\\frac{2}{L}} \\sin\\left( \\frac{n\\pi x}{L} \\right)
+    \\]
+
+    **Енергії:**
+
+    \\[
+    E_n = \\frac{n^2 \\pi^2 \\hbar^2}{2mL^2}
+    \\]
+    """)
+def finite_well_description():
+    """
+    ОПИС КІНЦЕВОЇ ЯМИ
+
+    Можна додавати пояснення:
+    - дискретні стани
+    - експоненти за межами ями
+    - умови узгодження
+    """
+    import streamlit as st
+    st.subheader("Кінцева потенціальна яма")
+    st.markdown("""
+    **Опис:**  
+    У кінцевій ямі хвильова функція складається з синусів/косинусів усередині  
+    та експонент за межами:
+
+    - всередині:  
+      \\( \\psi = A \\cos(kx) \\) або \\( A \\sin(kx) \\)
+
+    - зовні:  
+      \\( \\psi = C e^{-\\kappa x} \\)
+
+    Енергії визначаються рішенням трансцендентного рівняння:
+    """)
 
 # -------------------------------------------------------------------------
 # 1. КОНСТАНТИ
@@ -243,7 +294,10 @@ def run_finite_well_sim(params):
     setup_plot_style(ax, f"Стаціонарний стан n={n}")
 
     # Діапазон X: від -L до 2L (щоб показати хвости)
-    x = np.linspace(-L_val*0.8, L_val*1.8, 1000)
+    # більш фізичний інтервал: симетрично навколо бар’єра
+    x = np.linspace(-2*L_val, 2*L_val, 3000)
+
+
     
     # 1. Малюємо Яму (Стінки)
     ax.fill_between(x, 0, U0_ev, where=(x <= 0), color='#4A90E2', alpha=0.2, label='Стінки бар\'єру')
@@ -313,7 +367,10 @@ def run_infinite_well_sim(params):
     setup_plot_style(ax, f"Стаціонарний стан n={n}")
 
     # Діапазон X
-    x = np.linspace(-L_val*0.2, L_val*1.2, 1000)
+    # x масштабований разом із L
+    x = np.linspace(0, L_val, 2000)
+
+
     
     # 1. Малюємо Стінки
     ax.axvline(0, color='white', linewidth=3)
@@ -330,6 +387,10 @@ def run_infinite_well_sim(params):
     if np.max(np.abs(psi)) > 0:
         psi /= np.max(np.abs(psi))
         prob /= np.max(prob)
+
+
+
+    
 
     # 3. Малюємо хвилю
     draw_level_and_wave(ax, x, psi, prob, E_ev, L_val)
