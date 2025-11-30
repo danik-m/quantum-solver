@@ -11,6 +11,9 @@ import matplotlib.pyplot as plt
 import math
 from scipy import constants
 from scipy import linalg
+from scipy.integrate import simps
+
+
 
 # -------------------------------------------------------------------------
 # 1. КОНСТАНТИ
@@ -222,7 +225,13 @@ def run_barrier_sim(input_params=None, input_sub_type=None):
 
         # Параметри L
         if sub_type == "Прямокутний бар'єр":
-            params['L'] = st.sidebar.number_input("Ширина L (м)", value=1e-20, step=1e-10, format="%.2e")
+            params['L'] = st.sidebar.number_input(
+    "Ширина L (м)",
+    value=1e-9,       # 1 нм, як і в основній ямі
+    step=1e-10,       # 0.1 нм
+    format="%.2e"
+)
+
         else:
             params['L'] = 0.0 
 
