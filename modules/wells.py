@@ -6,7 +6,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from scipy import constants
 from scipy import optimize
-from scipy.integrate import simps
+from scipy.integrate import simpson
+
 
 def infinite_well_description():
     """
